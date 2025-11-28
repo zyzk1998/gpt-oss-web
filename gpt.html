@@ -1,0 +1,271 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Ollama GPT-OSS 对话</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <link href="https://cdn.jsdelivr.net/npm/font-awesome@4.7.0/css/font-awesome.min.css" rel="stylesheet">
+    <script>
+        tailwind.config = {
+            darkMode: 'class',
+            theme: {
+                extend: {
+                    colors: {
+                        primary: '#3b82f6',
+                        secondary: '#64748b',
+                        dark: '#1e293b',
+                        light: '#f8fafc',
+                        accent: '#8b5cf6',
+                    },
+                    fontFamily: {
+                        sans: ['Inter', 'system-ui', 'sans-serif'],
+                    },
+                    animation: {
+                        'pulse-slow': 'pulse 2s cubic-bezier(0.4, 0, 0.6, 1) infinite',
+                        'slide-up': 'slideUp 0.3s ease-out forwards',
+                         'fade-in': 'fadeIn 0.3s ease-out forwards',
+                    },
+                    keyframes: {
+                        slideUp: {
+                            '0%': { transform: 'translateY(20px)', opacity: '0' },
+                            '100%': { transform: 'translateY(0)', opacity: '1' },
+                        },
+                        fadeIn: {
+                            '0%': { opacity: '0' },
+                            '100%': { opacity: '1' },
+                        },
+                    },
+                },
+            }
+        }
+    </script>
+    <style type="text/tailwindcss">
+        @layer utilities {
+            .content-auto { content-visibility: auto; }
+            .scrollbar-hide { scrollbar-width: none; -ms-overflow-style: none; }
+            .scrollbar-hide::-webkit-scrollbar { display: none; }
+            .text-shadow { text-shadow: 0 1px 2px rgba(0,0,0,0.1); }
+            .bg-blur { backdrop-filter: blur(8px); }
+        }
+    </style>
+</head>
+<body class="bg-gray-50 dark:bg-dark min-h-screen flex flex-col transition-colors duration-300">
+    <header class="bg-white dark:bg-gray-900 shadow-sm sticky top-0 z-50 transition-all duration-300">
+        <div class="container mx-auto px-4 py-3 flex items-center justify-between">
+            <div class="flex items-center space-x-2">
+                <i class="fa fa-comments text-primary text-2xl"></i>
+                <h1 class="text-xl font-bold text-gray-800 dark:text-white">Ollama GPT-OSS 对话</h1>
+                <span class="bg-primary/10 text-primary text-xs px-2 py-1 rounded-full">latest</span>
+            </div>
+            <div class="flex items-center space-x-4">
+                <button id="theme-toggle" class="p-2 rounded-full hover:bg-gray-200 dark:hover:bg-gray-800 transition-c>
+                    <i class="fa fa-moon-o dark:hidden text-gray-600"></i>
+                    <i class="fa fa-sun-o hidden dark:inline text-yellow-400"></i>
+                </button>
+                <button id="clear-chat" class="p-2 rounded-full hover:bg-gray-200 dark:hover:bg-gray-800 transition-col>
+                    <i class="fa fa-trash-o text-gray-600 dark:text-gray-300"></i>
+                </button>
+            </div>
+        </div>
+    </header>
+
+    <main class="flex-1 container mx-auto px-4 py-6 overflow-hidden">
+        <div id="chat-container" class="h-[calc(100vh-180px)] overflow-y-auto scrollbar-hide space-y-6 pb-4">
+            <div class="flex flex-col items-start animate-fade-in">
+                <div class="flex items-center space-x-2 mb-2">
+                    <div class="w-8 h-8 rounded-full bg-primary flex items-center justify-center text-white">
+                        <i class="fa fa-robot"></i>
+                         </div>
+                    <span class="font-medium text-gray-700 dark:text-gray-300">GPT-OSS:latest</span>
+                </div>
+                <div class="bg-white dark:bg-gray-800 rounded-lg rounded-tl-none px-4 py-3 shadow-sm max-w-3xl">
+                    <p class="text-gray-700 dark:text-gray-300">你好！我是本地部署的 GPT-OSS:latest 模型。有什么我可以[>
+                </div>
+            </div>
+        </div>
+
+        <div class="sticky bottom-0 bg-white dark:bg-gray-900 shadow-lg rounded-xl p-4 mt-4 transition-all duration-300>
+            <form id="chat-form" class="flex flex-col space-y-3">
+                <textarea
+                    id="user-input"
+                    class="w-full px-4 py-3 rounded-lg border border-gray-300 dark:border-gray-700 bg-gray-50 dark:bg-g>
+                    placeholder="输入你的问题..."
+                    required
+                ></textarea>
+                <div class="flex items-center justify-between">
+                    <div class="text-sm text-gray-500 dark:text-gray-400">
+                        <i class="fa fa-server mr-1"></i> 本地部署 · Ollama
+                    </div>
+                    <button
+                        type="submit"
+                        class="bg-primary hover:bg-primary/90 text-white px-6 py-2 rounded-lg flex items-center space-x>
+                    >
+                        <span>发送</span>
+                         <i class="fa fa-paper-plane"></i>
+                    </button>
+                </div>
+            </form>
+        </div>
+    </main>
+
+    <footer class="bg-white dark:bg-gray-900 py-3 border-t border-gray-200 dark:border-gray-800 transition-colors durat>
+        <div class="container mx-auto px-4 text-center text-sm text-gray-500 dark:text-gray-400">
+            <p>© 2025 Ollama GPT-OSS 对话界面 | 本地模型部署</p>
+        </div>
+    </footer>
+
+    <script>
+        const chatForm = document.getElementById('chat-form');
+        const userInput = document.getElementById('user-input');
+        const chatContainer = document.getElementById('chat-container');
+        const themeToggle = document.getElementById('theme-toggle');
+        const clearChat = document.getElementById('clear-chat');
+
+        // 主题初始化
+        if (localStorage.theme === 'dark' || (!('theme' in localStorage) && window.matchMedia('(prefers-color-scheme: d>
+            document.documentElement.classList.add('dark');
+        } else {
+            document.documentElement.classList.remove('dark');
+        }
+        themeToggle.addEventListener('click', () => {
+            document.documentElement.classList.toggle('dark');
+            localStorage.theme = document.documentElement.classList.contains('dark') ? 'dark' : 'light';
+        });
+
+        // 清空对话
+        clearChat.addEventListener('click', () => {
+            if (confirm('确定要清空所有对话记录吗？')) {
+                chatContainer.innerHTML = `
+                    <div class="flex flex-col items-start animate-fade-in">
+                        <div class="flex items-center space-x-2 mb-2">
+                            <div class="w-8 h-8 rounded-full bg-primary flex items-center justify-center text-white">
+                                <i class="fa fa-robot"></i>
+                            </div>
+                            <span class="font-medium text-gray-700 dark:text-gray-300">GPT-OSS:latest</span>
+                        </div>
+                        <div class="bg-white dark:bg-gray-800 rounded-lg rounded-tl-none px-4 py-3 shadow-sm max-w-3xl">
+                            <p class="text-gray-700 dark:text-gray-300">你好！我是本地部署的 GPT-OSS:latest 模型。有什[>
+                        </div>
+                    </div>
+                `;
+            }
+        });
+
+        // 添加消息
+        function addMessage(content, isUser = false) {
+         const messageDiv = document.createElement('div');
+            messageDiv.className = `flex ${isUser ? 'flex-row-reverse' : 'flex-row'} items-start space-x-3 space-x-reve>
+
+            const avatarClass = isUser ? 'bg-gray-200 dark:bg-gray-700 text-gray-800 dark:text-gray-200' : 'bg-primary >
+            const messageBgClass = isUser ? 'bg-primary text-white rounded-lg rounded-tr-none' : 'bg-white dark:bg-gray>
+            const name = isUser ? '你' : 'GPT-OSS:latest';
+            const icon = isUser ? 'fa-user' : 'fa-robot';
+
+            messageDiv.innerHTML = `
+                <div class="w-8 h-8 rounded-full ${avatarClass} flex items-center justify-center flex-shrink-0 mt-1">
+                    <i class="fa ${icon}"></i>
+                </div>
+                <div class="flex flex-col ${isUser ? 'items-end' : 'items-start'} flex-1">
+                    <div class="flex items-center space-x-2 mb-1 ${isUser ? 'flex-row-reverse' : 'flex-row'}">
+                        <span class="font-medium text-sm ${isUser ? 'text-gray-700 dark:text-gray-300' : 'text-gray-700>
+                    </div>
+                    <div class="${messageBgClass} px-4 py-3 shadow-sm max-w-3xl break-words">
+                        ${content.replace(/\n/g, '<br>').replace(/\*\*(.*?)\*\*/g, '<strong>$1</strong>').replace(/\*(.>
+                    </div>
+                </div>
+            `;
+
+            chatContainer.appendChild(messageDiv);
+            chatContainer.scrollTop = chatContainer.scrollHeight;
+            setTimeout(() => messageDiv.classList.add('animate-fade-in'), 10);
+        }
+         // 加载中提示
+        function addLoadingMessage() {
+            const loadingDiv = document.createElement('div');
+            loadingDiv.id = 'loading-message';
+            loadingDiv.className = 'flex flex-row items-start space-x-3 animate-slide-up opacity-0';
+
+            loadingDiv.innerHTML = `
+                <div class="w-8 h-8 rounded-full bg-primary text-white flex items-center justify-center flex-shrink-0 m>
+                    <i class="fa fa-robot"></i>
+                </div>
+                <div class="flex flex-col items-start flex-1">
+                    <div class="flex items-center space-x-2 mb-1">
+                        <span class="font-medium text-sm text-gray-700 dark:text-gray-300">GPT-OSS:latest</span>
+                    </div>
+                    <div class="bg-white dark:bg-gray-800 rounded-lg rounded-tl-none px-4 py-3 shadow-sm max-w-3xl">
+                        <div class="flex space-x-1 items-center">
+                            <div class="w-2 h-2 bg-gray-400 dark:bg-gray-500 rounded-full animate-pulse"></div>
+                            <div class="w-2 h-2 bg-gray-400 dark:bg-gray-500 rounded-full animate-pulse" style="animati>
+                            <div class="w-2 h-2 bg-gray-400 dark:bg-gray-500 rounded-full animate-pulse" style="animati>
+                        </div>
+                    </div>
+                </div>
+            `;
+
+            chatContainer.appendChild(loadingDiv);
+            chatContainer.scrollTop = chatContainer.scrollHeight;
+             setTimeout(() => loadingDiv.classList.add('animate-fade-in'), 10);
+            return loadingDiv;
+        }
+
+        // 移除加载中提示
+        function removeLoadingMessage() {
+            const loadingMessage = document.getElementById('loading-message');
+            if (loadingMessage) loadingMessage.remove();
+        }
+
+        // 发送消息到Ollama（已内置服务器内网IP：192.168.8.111）
+        async function sendMessageToOllama(message) {
+            try {
+                const loadingMessage = addLoadingMessage();
+                // 固定为你的服务器内网IP+Ollama端口
+                const response = await fetch('http://192.168.8.111:8000/api/chat', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({
+                        model: 'gpt-oss:latest',
+                        messages: [{ role: 'user', content: message }],
+                        stream: false,
+                        options: { temperature: 0.5, top_p: 0.9, max_tokens: 2048 }
+                    })
+                });
+ if (!response.ok) throw new Error(`API 响应错误: ${response.status}`);
+                const data = await response.json();
+                removeLoadingMessage();
+
+                data.message?.content ? addMessage(data.message.content, false) : addMessage('很抱歉，我无法生成响应。[>
+            } catch (error) {
+                removeLoadingMessage();
+                console.error('发送消息出错:', error);
+                addMessage(`出错了: ${error.message}\n请检查Ollama服务是否正常启动。`, false);
+            }
+        }
+
+        // 表单提交
+        chatForm.addEventListener('submit', (e) => {
+            e.preventDefault();
+            const message = userInput.value.trim();
+            if (!message) return;
+            addMessage(message, true);
+            userInput.value = '';
+            sendMessageToOllama(message);
+        });
+
+        // Ctrl+Enter发送
+        userInput.addEventListener('keydown', (e) => {
+            if (e.ctrlKey && e.key === 'Enter') chatForm.dispatchEvent(new Event('submit'));
+        });
+
+        
+        // 页面加载聚焦输入框
+        window.addEventListener('load', () => userInput.focus());
+
+        // 窗口大小变化调整聊天区域高度
+        window.addEventListener('resize', () => {
+            chatContainer.style.height = `calc(100vh - 180px)`;
+        });
+    </script>
+</body>
+</html>

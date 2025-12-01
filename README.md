@@ -68,7 +68,11 @@ nohup ollama serve &
 
 内网环境
 
-http://[服务器内网IP]:8082
+ollama在11434端口运行
+
+网页服务部署： nohup ollama serve --host 0.0.0.0:11434 --origins "http://192.168.8.111:8082" &
+
+任意计算机打开 http://[服务器内网IP]:8082
 
 同网络下设备直接访问
 

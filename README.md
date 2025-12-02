@@ -48,7 +48,7 @@ nohup ollama serve > ollama.log 2>&1 &
 
 ---
 
-## 🧬 Galaxy BioBlend RAG Module (新增子系统)
+###  🧬 Galaxy BioBlend RAG Module (新增子系统)
 
 > **功能**: 基于本地大模型 (GPT-OSS) 与 BioBlend 库的 Galaxy 平台自动化操作代理。
 

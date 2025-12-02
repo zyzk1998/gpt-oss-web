@@ -77,13 +77,12 @@ nohup ollama serve > ollama.log 2>&1 &
   "galaxy_url": "https://usegalaxy.org",
   "api_key": "YOUR_REAL_API_KEY"
 }
-
+```
 **2. 初始化知识库**
-code
-Bash
+```
 python extract_rules.py
-
+```
 **3. 启动助手**
-code
-Bash
+```
 python local_rag.py
+```

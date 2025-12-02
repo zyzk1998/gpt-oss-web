@@ -24,7 +24,7 @@
                     animation: {
                         'pulse-slow': 'pulse 2s cubic-bezier(0.4, 0, 0.6, 1) infinite',
                         'slide-up': 'slideUp 0.3s ease-out forwards',
-                         'fade-in': 'fadeIn 0.3s ease-out forwards',
+                        'fade-in': 'fadeIn 0.3s ease-out forwards',
                     },
                     keyframes: {
                         slideUp: {
@@ -51,6 +51,7 @@
     </style>
 </head>
 <body class="bg-gray-50 dark:bg-dark min-h-screen flex flex-col transition-colors duration-300">
+    <!-- Header -->
     <header class="bg-white dark:bg-gray-900 shadow-sm sticky top-0 z-50 transition-all duration-300">
         <div class="container mx-auto px-4 py-3 flex items-center justify-between">
             <div class="flex items-center space-x-2">
@@ -59,38 +60,41 @@
                 <span class="bg-primary/10 text-primary text-xs px-2 py-1 rounded-full">latest</span>
             </div>
             <div class="flex items-center space-x-4">
-                <button id="theme-toggle" class="p-2 rounded-full hover:bg-gray-200 dark:hover:bg-gray-800 transition-c>
+                <button id="theme-toggle" class="p-2 rounded-full hover:bg-gray-200 dark:hover:bg-gray-800 transition-colors">
                     <i class="fa fa-moon-o dark:hidden text-gray-600"></i>
                     <i class="fa fa-sun-o hidden dark:inline text-yellow-400"></i>
                 </button>
-                <button id="clear-chat" class="p-2 rounded-full hover:bg-gray-200 dark:hover:bg-gray-800 transition-col>
+                <button id="clear-chat" class="p-2 rounded-full hover:bg-gray-200 dark:hover:bg-gray-800 transition-colors">
                     <i class="fa fa-trash-o text-gray-600 dark:text-gray-300"></i>
                 </button>
             </div>
         </div>
     </header>
 
+    <!-- Main Chat Area -->
     <main class="flex-1 container mx-auto px-4 py-6 overflow-hidden">
         <div id="chat-container" class="h-[calc(100vh-180px)] overflow-y-auto scrollbar-hide space-y-6 pb-4">
+            <!-- Welcome Message -->
             <div class="flex flex-col items-start animate-fade-in">
                 <div class="flex items-center space-x-2 mb-2">
                     <div class="w-8 h-8 rounded-full bg-primary flex items-center justify-center text-white">
                         <i class="fa fa-robot"></i>
-                         </div>
+                    </div>
                     <span class="font-medium text-gray-700 dark:text-gray-300">GPT</span>
                 </div>
                 <div class="bg-white dark:bg-gray-800 rounded-lg rounded-tl-none px-4 py-3 shadow-sm max-w-3xl">
-                    <p class="text-gray-700 dark:text-gray-300">你好！我是本地部署的 GPT-OSS:latest 模型。有什么我可以[>
+                    <p class="text-gray-700 dark:text-gray-300">你好！我是本地部署的 GPT-OSS:latest 模型。有什么我可以帮你的吗？</p>
                 </div>
             </div>
         </div>
 
-        <div class="sticky bottom-0 bg-white dark:bg-gray-900 shadow-lg rounded-xl p-4 mt-4 transition-all duration-300>
+        <!-- Input Area -->
+        <div class="sticky bottom-0 bg-white dark:bg-gray-900 shadow-lg rounded-xl p-4 mt-4 transition-all duration-300">
             <form id="chat-form" class="flex flex-col space-y-3">
                 <textarea
                     id="user-input"
-                    class="w-full px-4 py-3 rounded-lg border border-gray-300 dark:border-gray-700 bg-gray-50 dark:bg-g>
-                    placeholder="输入你的问题..."
+                    class="w-full px-4 py-3 rounded-lg border border-gray-300 dark:border-gray-700 bg-gray-50 dark:bg-gray-800 text-gray-800 dark:text-white focus:outline-none focus:ring-2 focus:ring-primary focus:border-transparent resize-none h-24"
+                    placeholder="输入你的问题... (Shift+Enter 换行, Ctrl+Enter 发送)"
                     required
                 ></textarea>
                 <div class="flex items-center justify-between">
@@ -99,17 +103,18 @@
                     </div>
                     <button
                         type="submit"
-                        class="bg-primary hover:bg-primary/90 text-white px-6 py-2 rounded-lg flex items-center space-x>
+                        class="bg-primary hover:bg-primary/90 text-white px-6 py-2 rounded-lg flex items-center space-x-2 transition-colors"
                     >
                         <span>发送</span>
-                         <i class="fa fa-paper-plane"></i>
+                        <i class="fa fa-paper-plane"></i>
                     </button>
                 </div>
             </form>
         </div>
     </main>
 
-    <footer class="bg-white dark:bg-gray-900 py-3 border-t border-gray-200 dark:border-gray-800 transition-colors durat>
+    <!-- Footer -->
+    <footer class="bg-white dark:bg-gray-900 py-3 border-t border-gray-200 dark:border-gray-800 transition-colors duration-300">
         <div class="container mx-auto px-4 text-center text-sm text-gray-500 dark:text-gray-400">
             <p>© 2025 Ollama GPT-OSS 对话界面 | 本地模型部署</p>
         </div>
@@ -122,8 +127,8 @@
         const themeToggle = document.getElementById('theme-toggle');
         const clearChat = document.getElementById('clear-chat');
 
-        // 主题初始化
-        if (localStorage.theme === 'dark' || (!('theme' in localStorage) && window.matchMedia('(prefers-color-scheme: d>
+        // --- 主题初始化 ---
+        if (localStorage.theme === 'dark' || (!('theme' in localStorage) && window.matchMedia('(prefers-color-scheme: dark)').matches)) {
             document.documentElement.classList.add('dark');
         } else {
             document.documentElement.classList.remove('dark');
@@ -133,7 +138,7 @@
             localStorage.theme = document.documentElement.classList.contains('dark') ? 'dark' : 'light';
         });
 
-        // 清空对话
+        // --- 清空对话 ---
         clearChat.addEventListener('click', () => {
             if (confirm('确定要清空所有对话记录吗？')) {
                 chatContainer.innerHTML = `
@@ -145,22 +150,30 @@
                             <span class="font-medium text-gray-700 dark:text-gray-300">GPT</span>
                         </div>
                         <div class="bg-white dark:bg-gray-800 rounded-lg rounded-tl-none px-4 py-3 shadow-sm max-w-3xl">
-                            <p class="text-gray-700 dark:text-gray-300">你好！我是本地部署的 GPT-OSS:latest 模型。有什[>
+                            <p class="text-gray-700 dark:text-gray-300">你好！我是本地部署的 GPT-OSS:latest 模型。有什么我可以帮你的吗？</p>
                         </div>
                     </div>
                 `;
             }
         });
 
-        // 添加消息
+        // --- 添加消息到界面 ---
         function addMessage(content, isUser = false) {
-         const messageDiv = document.createElement('div');
-            messageDiv.className = `flex ${isUser ? 'flex-row-reverse' : 'flex-row'} items-start space-x-3 space-x-reve>
+            const messageDiv = document.createElement('div');
+            messageDiv.className = `flex ${isUser ? 'flex-row-reverse' : 'flex-row'} items-start space-x-3 ${isUser ? 'space-x-reverse' : ''} animate-slide-up`;
 
-            const avatarClass = isUser ? 'bg-gray-200 dark:bg-gray-700 text-gray-800 dark:text-gray-200' : 'bg-primary >
-            const messageBgClass = isUser ? 'bg-primary text-white rounded-lg rounded-tr-none' : 'bg-white dark:bg-gray>
+            const avatarClass = isUser ? 'bg-gray-200 dark:bg-gray-700 text-gray-800 dark:text-gray-200' : 'bg-primary text-white';
+            const messageBgClass = isUser ? 'bg-primary text-white rounded-lg rounded-tr-none' : 'bg-white dark:bg-gray-800 rounded-lg rounded-tl-none';
             const name = isUser ? '你' : 'GPT-OSS:latest';
             const icon = isUser ? 'fa-user' : 'fa-robot';
+
+            // 基础 Markdown 处理
+            const formattedContent = content
+                .replace(/</g, "&lt;").replace(/>/g, "&gt;") // 防注入
+                .replace(/\n/g, '<br>')
+                .replace(/\*\*(.*?)\*\*/g, '<strong>$1</strong>')
+                .replace(/\*(.*?)\*/g, '<em>$1</em>')
+                .replace(/`(.*?)`/g, '<code class="bg-gray-200 dark:bg-gray-700 px-1 rounded font-mono text-sm text-red-500">$1</code>');
 
             messageDiv.innerHTML = `
                 <div class="w-8 h-8 rounded-full ${avatarClass} flex items-center justify-center flex-shrink-0 mt-1">
@@ -168,10 +181,10 @@
                 </div>
                 <div class="flex flex-col ${isUser ? 'items-end' : 'items-start'} flex-1">
                     <div class="flex items-center space-x-2 mb-1 ${isUser ? 'flex-row-reverse' : 'flex-row'}">
-                        <span class="font-medium text-sm ${isUser ? 'text-gray-700 dark:text-gray-300' : 'text-gray-700>
+                        <span class="font-medium text-sm text-gray-700 dark:text-gray-300">${name}</span>
                     </div>
-                    <div class="${messageBgClass} px-4 py-3 shadow-sm max-w-3xl break-words">
-                        ${content.replace(/\n/g, '<br>').replace(/\*\*(.*?)\*\*/g, '<strong>$1</strong>').replace(/\*(.>
+                    <div class="${messageBgClass} px-4 py-3 shadow-sm max-w-3xl break-words leading-relaxed">
+                        ${formattedContent}
                     </div>
                 </div>
             `;
@@ -180,14 +193,15 @@
             chatContainer.scrollTop = chatContainer.scrollHeight;
             setTimeout(() => messageDiv.classList.add('animate-fade-in'), 10);
         }
-         // 加载中提示
+
+        // --- 加载中动画 ---
         function addLoadingMessage() {
             const loadingDiv = document.createElement('div');
             loadingDiv.id = 'loading-message';
-            loadingDiv.className = 'flex flex-row items-start space-x-3 animate-slide-up opacity-0';
+            loadingDiv.className = 'flex flex-row items-start space-x-3 animate-slide-up';
 
             loadingDiv.innerHTML = `
-                <div class="w-8 h-8 rounded-full bg-primary text-white flex items-center justify-center flex-shrink-0 m>
+                <div class="w-8 h-8 rounded-full bg-primary text-white flex items-center justify-center flex-shrink-0 mt-1">
                     <i class="fa fa-robot"></i>
                 </div>
                 <div class="flex flex-col items-start flex-1">
@@ -195,10 +209,10 @@
                         <span class="font-medium text-sm text-gray-700 dark:text-gray-300">GPT-OSS:latest</span>
                     </div>
                     <div class="bg-white dark:bg-gray-800 rounded-lg rounded-tl-none px-4 py-3 shadow-sm max-w-3xl">
-                        <div class="flex space-x-1 items-center">
+                        <div class="flex space-x-1 items-center h-6">
                             <div class="w-2 h-2 bg-gray-400 dark:bg-gray-500 rounded-full animate-pulse"></div>
-                            <div class="w-2 h-2 bg-gray-400 dark:bg-gray-500 rounded-full animate-pulse" style="animati>
-                            <div class="w-2 h-2 bg-gray-400 dark:bg-gray-500 rounded-full animate-pulse" style="animati>
+                            <div class="w-2 h-2 bg-gray-400 dark:bg-gray-500 rounded-full animate-pulse" style="animation-delay: 0.2s"></div>
+                            <div class="w-2 h-2 bg-gray-400 dark:bg-gray-500 rounded-full animate-pulse" style="animation-delay: 0.4s"></div>
                         </div>
                     </div>
                 </div>
@@ -206,44 +220,50 @@
 
             chatContainer.appendChild(loadingDiv);
             chatContainer.scrollTop = chatContainer.scrollHeight;
-             setTimeout(() => loadingDiv.classList.add('animate-fade-in'), 10);
             return loadingDiv;
         }
 
-        // 移除加载中提示
         function removeLoadingMessage() {
             const loadingMessage = document.getElementById('loading-message');
             if (loadingMessage) loadingMessage.remove();
         }
 
-        // 发送消息到Ollama（已内置服务器内网IP：192.168.8.111）
+        // --- 核心：发送消息到 Ollama ---
         async function sendMessageToOllama(message) {
             try {
-                const loadingMessage = addLoadingMessage();
-                // 固定为你的服务器内网IP+Ollama端口
-                const response = await fetch('http://192.168.8.111:8000/api/chat', {
+                addLoadingMessage();
+                
+                // 【重要】这里已修正为 Ollama 的端口 11434，且指向你的服务器 IP
+                const response = await fetch('http://192.168.8.111:11434/api/chat', {
                     method: 'POST',
                     headers: { 'Content-Type': 'application/json' },
                     body: JSON.stringify({
                         model: 'gpt-oss:latest',
                         messages: [{ role: 'user', content: message }],
-                        stream: false,
+                        stream: false, // 暂时关闭流式以简化处理
                         options: { temperature: 0.5, top_p: 0.9, max_tokens: 2048 }
                     })
                 });
- if (!response.ok) throw new Error(`API 响应错误: ${response.status}`);
+
+                if (!response.ok) throw new Error(`API 连接错误: ${response.status}`);
+                
                 const data = await response.json();
                 removeLoadingMessage();
 
-                data.message?.content ? addMessage(data.message.content, false) : addMessage('很抱歉，我无法生成响应。[>
+                if (data.message && data.message.content) {
+                    addMessage(data.message.content, false);
+                } else {
+                    addMessage('⚠️ 模型未返回内容，请检查模型是否加载成功。', false);
+                }
+
             } catch (error) {
                 removeLoadingMessage();
-                console.error('发送消息出错:', error);
-                addMessage(`出错了: ${error.message}\n请检查Ollama服务是否正常启动。`, false);
+                console.error('API Error:', error);
+                addMessage(`❌ 请求失败: ${error.message}\n请检查：\n1. Ollama 服务是否在 192.168.8.111:11434 运行\n2. 是否已配置 OLLAMA_ORIGINS="*"`, false);
             }
         }
 
-        // 表单提交
+        // --- 事件监听 ---
         chatForm.addEventListener('submit', (e) => {
             e.preventDefault();
             const message = userInput.value.trim();
@@ -253,16 +273,15 @@
             sendMessageToOllama(message);
         });
 
-        // Ctrl+Enter发送
+        // Ctrl+Enter 发送
         userInput.addEventListener('keydown', (e) => {
-            if (e.ctrlKey && e.key === 'Enter') chatForm.dispatchEvent(new Event('submit'));
+            if (e.ctrlKey && e.key === 'Enter') {
+                chatForm.dispatchEvent(new Event('submit'));
+            }
         });
 
-        
-        // 页面加载聚焦输入框
+        // 初始化
         window.addEventListener('load', () => userInput.focus());
-
-        // 窗口大小变化调整聊天区域高度
         window.addEventListener('resize', () => {
             chatContainer.style.height = `calc(100vh - 180px)`;
         });

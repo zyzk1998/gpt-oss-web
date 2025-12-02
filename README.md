@@ -45,7 +45,7 @@ pkill ollama
 export OLLAMA_HOST=0.0.0.0
 export OLLAMA_ORIGINS="*"
 nohup ollama serve > ollama.log 2>&1 &
-
+```
 ---
 
 ###  🧬 Galaxy BioBlend RAG Module (新增子系统)

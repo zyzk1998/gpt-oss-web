@@ -45,3 +45,45 @@ pkill ollama
 export OLLAMA_HOST=0.0.0.0
 export OLLAMA_ORIGINS="*"
 nohup ollama serve > ollama.log 2>&1 &
+
+---
+
+## 🧬 Galaxy BioBlend RAG Module (新增子系统)
+
+> **功能**: 基于本地大模型 (GPT-OSS) 与 BioBlend 库的 Galaxy 平台自动化操作代理。
+
+本模块通过 RAG 技术解决了 Galaxy API 文档复杂难懂的问题，实现了从“自然语言指令”到“安全可执行 Python 脚本”的转化。
+
+### 🛠️ 工程架构
+
+1.  **数据层 (ETL)**: `extract_rules.py` - 扫描 `bioblend` 库，清洗并提取 160+ 个 API 方法签名，生成 `bioblend_knowledge.json`。
+2.  **存储层**: `nomic-embed-text` 向量化 -> 本地 ChromaDB 存储。
+3.  **逻辑层**: `local_rag.py` - 检索 API 文档 -> GPT-OSS 生成代码 -> 强制植入配置读取逻辑。
+4.  **执行层**: `verify_galaxy.py` - 验证脚本在真实环境的执行效果。
+
+### 📂 文件说明
+
+*   `extract_rules.py`: **[构建]** 知识库提取工具。
+*   `local_rag.py`: **[核心]** 智能问答与代码生成主程序。
+*   `verify_galaxy.py`: **[测试]** 连接与鉴权验证脚本。
+*   `secrets/galaxy_config.json`: **[配置]** 敏感信息配置文件（需手动创建，勿上传 Git）。
+
+### 🚀 快速开始
+
+**1. 配置密钥**
+创建 `secrets/galaxy_config.json`:
+```json
+{
+  "galaxy_url": "https://usegalaxy.org",
+  "api_key": "YOUR_REAL_API_KEY"
+}
+
+**2. 初始化知识库**
+code
+Bash
+python extract_rules.py
+
+**3. 启动助手**
+code
+Bash
+python local_rag.py

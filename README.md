@@ -66,7 +66,7 @@ nohup ollama serve > ollama.log 2>&1 &
 *   `extract_rules.py`: **[构建]** 知识库提取工具。
 *   `local_rag.py`: **[核心]** 智能问答与代码生成主程序。
 *   `verify_galaxy.py`: **[测试]** 连接与鉴权验证脚本。
-*   `secrets/galaxy_config.json`: **[配置]** 敏感信息配置文件（需手动创建，勿上传 Git）。
+*   `secrets/galaxy_config.json`: **[配置]** 敏感信息配置文件。
 
 ### 🚀 快速开始
 

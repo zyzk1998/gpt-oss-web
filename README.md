@@ -80,6 +80,8 @@
 ├── assets
 │   └── system_architecture.png  # 系统架构图
 └── .env                    # 环境变量配置
+```
+
 ⚙️ 部署与使用指南
 1. 环境准备
 
@@ -107,10 +109,7 @@ Ini
 download
 content_copy
 expand_less
-# Galaxy 服务器地址 (官方或私有实例)
-GALAXY_URL=https://usegalaxy.org
-# 你的 API Key (在 Galaxy 用户设置中获取)
-GALAXY_API_KEY=your_api_key_here
+
 3. 初始化知识库 (首次运行或更新工具时)
 
 从 Galaxy 服务器抓取最新工具列表，并构建向量索引：
@@ -120,7 +119,7 @@ Bash
 download
 content_copy
 expand_less
-# 1. 爬取工具规则
+# 1. 提取工具规则
 python extract_rules.py
 
 # 2. 构建向量数据库

@@ -52,7 +52,7 @@
 
 ## 🏗️ 系统架构
 
-![Computer Science AI + Bio-Integration System Workflow](assets/system_architecture.png)
+![Computer Science AI + Bio-Integration System Workflow](./system_architecture.png)
 
 > **流程说明**：
 > 1. **用户前端 (User Frontend)**：支持文本查询与文件上传，提供可视化交互界面。

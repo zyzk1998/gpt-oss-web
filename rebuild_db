@@ -1,0 +1,70 @@
+import json
+import os
+import shutil
+from langchain_ollama import OllamaEmbeddings
+from langchain_chroma import Chroma
+from langchain_core.documents import Document
+from dotenv import load_dotenv
+
+# 加载环境变量
+load_dotenv()
+
+# ================= 配置区域 =================
+# 必须和你的 app.py 里的配置保持一致
+JSON_PATH = "data/bioblend_knowledge.json"
+DB_PATH = "data/chroma_db_bioblend"
+EMBED_MODEL = "nomic-embed-text"  # 确保你 Ollama 里装了这个模型
+OLLAMA_URL = "http://localhost:11434"
+# ===========================================
+
+def rebuild():
+    print(f"🚀 开始重建知识库...")
+
+    # 1. 暴力清理旧数据 (相当于格式化大脑)
+    if os.path.exists(DB_PATH):
+        print(f"🗑️  正在删除旧的向量数据库: {DB_PATH}")
+        shutil.rmtree(DB_PATH)
+    else:
+        print(f"✨ 未发现旧数据库，准备新建...")
+
+    # 2. 读取 JSON 文件 (原料)
+    if not os.path.exists(JSON_PATH):
+        print(f"❌ 错误：找不到 {JSON_PATH}！请先运行 extract_rules.py")
+        return
+
+    print(f"📖 正在读取规则文件: {JSON_PATH} ...")
+    with open(JSON_PATH, "r", encoding="utf-8") as f:
+        data = json.load(f)
+
+    # 3. 转换格式
+    documents = []
+    for item in data:
+        # 将 JSON 的各个字段拼成一段完整的文本，方便 AI 理解
+        # 这里的 text_for_vector_db 是我们在 extract_rules.py 里精心构造的
+        content = item.get("text_for_vector_db", "")
+        if not content:
+            # 如果没有预处理好的文本，就兜底用 description
+            content = f"API: {item.get('api_call')}\nDesc: {item.get('description')}"
+            
+        doc = Document(
+            page_content=content,
+            metadata={"api_call": item.get("api_call", "unknown")}
+        )
+        documents.append(doc)
+
+    print(f"🧩 共加载了 {len(documents)} 条规则。")
+
+    # 4. 向量化并存储 (这一步最慢，需要调用 Ollama)
+    print(f"🧠 正在调用 Ollama ({EMBED_MODEL}) 进行向量化写入，请耐心等待...")
+    
+    try:
+        embeddings = OllamaEmbeddings(model=EMBED_MODEL, base_url=OLLAMA_URL)
+        Chroma.from_documents(documents, embeddings, persist_directory=DB_PATH)
+        print(f"✅ 成功！知识库已重建完成。")
+        print(f"📂 数据保存在: {DB_PATH}")
+    except Exception as e:
+        print(f"❌ 向量化失败: {e}")
+        print("请检查：1. Ollama 是否启动？ 2. 是否安装了 nomic-embed-text 模型？")
+
+if __name__ == "__main__":
+    rebuild()

@@ -83,10 +83,7 @@ Ini
 download
 content_copy
 expand_less
-# Galaxy 服务器地址 (官方或私有实例)
-GALAXY_URL=https://usegalaxy.org
-# 你的 API Key (在 Galaxy 用户设置中获取)
-GALAXY_API_KEY=your_api_key_here
+
 3. 初始化知识库 (首次运行或更新工具时)
 
 从 Galaxy 服务器抓取最新工具列表，并构建向量索引：

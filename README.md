@@ -53,44 +53,9 @@
 
 ## 🏗️ 系统架构
 
-```mermaid
-graph TD
-    User[用户 (Web/Mobile)] -->|文本/拖拽/粘贴| FastAPI[后端服务 (app.py)]
-    
-    subgraph "AI Core (Ollama Local)"
-        FastAPI -->|OCR 请求| Vision[llama3.2-vision]
-        FastAPI -->|推理/代码生成| Brain[gpt-oss:latest]
-        FastAPI -->|向量化| Embed[nomic-embed-text]
-    end
-    
-    subgraph "Knowledge Base"
-        Embed <--> ChromaDB[向量数据库 (2000+ Tools)]
-    end
-    
-    subgraph "Execution Environment"
-        Brain -->|生成 Python 代码| Sandbox[代码沙箱]
-        Sandbox -->|BioBlend API| Galaxy[Galaxy Server]
-    end
-    
-    Galaxy -->|执行结果| Sandbox
-    Sandbox -->|Markdown + 智能建议| User
-📂 项目目录结构
-code
-Text
-download
-content_copy
-expand_less
-.
-├── app.py                  # [核心] Web 后端主程序 (FastAPI + LangChain)
-├── extract_rules.py        # [ETL] Galaxy 工具爬虫与规则提取工具
-├── rebuild_db.py           # [构建] 向量数据库构建脚本 (JSON -> ChromaDB)
-├── verify_galaxy.py        # [测试] Galaxy 连接性验证脚本
-├── templates
-│   └── index.html          # [前端] 交互界面 (Bootstrap + Markdown + Drag&Drop)
-├── data
-│   ├── bioblend_knowledge.json  # 提取出的工具元数据
-│   └── chroma_db_bioblend       # 持久化向量数据库文件
-└── .env                    # 环境变量配置
+![System Architecture](system_architecture.jpeg)
+
+
 ⚙️ 部署与使用指南
 1. 环境准备
 
@@ -176,10 +141,6 @@ Ollama 资源：同时运行 Vision 和 LLM 模型需要一定的显存（建议
 安全性：生成的代码在本地沙箱执行，但仍建议不要连接生产环境的管理员账号。
 
 Maintainer: ZYZK
-Last Updated: 2025-02 (v1.3)
+Last Updated: 2025-12 (v1.3)
 
-code
-Code
-download
-content_copy
-expand_less
+

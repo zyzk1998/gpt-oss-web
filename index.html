@@ -60,12 +60,10 @@
     </nav>
 
     <div class="chat-container d-flex flex-column" id="chatBox">
+        <!-- 【修改点】改回了最初简洁的欢迎语 -->
         <div class="message system">
-            你好！我是你的生物信息学助手。<br>
-            <b>💡 小技巧：</b><br>
-            - 直接 <b>拖拽文件</b> 到这里上传<br>
-            - 截图后直接 <b>Ctrl+V</b> 粘贴<br>
-            - 点击下方的 <b>引导按钮</b> 快速提问
+            你好！我是你的生物信息助手。已连接 Galaxy 知识库。<br>
+            请告诉我你想做什么？例如：<b>"查询我的账户信息"</b> 或 <b>"列出所有可用的工具"</b>。
         </div>
     </div>
 
@@ -73,7 +71,6 @@
         <div class="input-group">
             <input type="file" id="fileInput" style="display: none;" onchange="handleFileSelect(this.files)">
             
-            <!-- 【优化】更明显的文件按钮 -->
             <button class="btn btn-outline-secondary" onclick="document.getElementById('fileInput').click()" title="上传文件 (支持拖拽/粘贴)">
                 📂 上传
             </button>
@@ -104,7 +101,7 @@
             dropOverlay.style.display = 'flex';
         });
 
-        // 拖拽离开 (需要判断是否真的离开了窗口)
+        // 拖拽离开
         window.addEventListener('dragleave', (e) => {
             e.preventDefault();
             if (e.clientX === 0 && e.clientY === 0) {
@@ -148,7 +145,6 @@
                     if (data.type === 'image') {
                         const msgDiv = appendMessage('system', `👁️ <b>图片识别结果：</b><br><blockquote>${data.ocr_text}</blockquote>`);
                         chatHistory.push({ user: "[上传了图片]", ai: data.ocr_text });
-                        // 渲染 OCR 后的建议
                         renderSuggestions(msgDiv, data.suggestions);
                     } else {
                         currentUploadedFile = { id: data.file_id, name: data.file_name };
@@ -159,7 +155,6 @@
                         badge.innerText = `📄 已就绪: ${data.file_name}`;
                         
                         chatHistory.push({ user: "[上传了文件]", ai: `文件 ${data.file_name} 上传成功` });
-                        // 渲染上传后的建议
                         renderSuggestions(msgDiv, data.suggestions);
                     }
                 } else {
@@ -168,7 +163,7 @@
             } catch (e) {
                 appendMessage('system', `❌ 网络错误: ${e}`);
             }
-            document.getElementById('fileInput').value = ''; // 重置
+            document.getElementById('fileInput').value = ''; 
         }
 
         // --- 3. 发送消息 ---
@@ -218,7 +213,6 @@
                     const simplifiedReply = data.reply.replace(/```[\s\S]*?```/g, '[代码执行结果]');
                     chatHistory.push({ user: text, ai: simplifiedReply });
                     
-                    // 【核心】渲染引导建议
                     if (data.suggestions && data.suggestions.length > 0) {
                         renderSuggestions(msgDiv, data.suggestions);
                     }

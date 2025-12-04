@@ -1,0 +1,41 @@
+import os
+from langchain_ollama import OllamaEmbeddings
+from langchain_chroma import Chroma
+from dotenv import load_dotenv
+
+load_dotenv()
+
+# 配置
+DB_PATH = "data/chroma_db_bioblend"
+EMBED_MODEL = "nomic-embed-text"
+OLLAMA_URL = "http://localhost:11434"
+
+def debug_retrieval():
+    print(f"🔍 正在加载向量库: {DB_PATH} ...")
+    if not os.path.exists(DB_PATH):
+        print("❌ 错误：找不到向量库文件夹！")
+        return
+
+    embeddings = OllamaEmbeddings(model=EMBED_MODEL, base_url=OLLAMA_URL)
+    vector_db = Chroma(persist_directory=DB_PATH, embedding_function=embeddings)
+    
+    question = "查询我的账户信息"
+    print(f"\n❓ 测试提问: {question}")
+    
+    # 关键：我们把 k 设大一点，看看正确答案排在第几名
+    print("--- 正在检索前 5 条相关知识 ---")
+    docs = vector_db.similarity_search(question, k=5)
+    
+    for i, doc in enumerate(docs):
+        print(f"\n[第 {i+1} 名] Score: (Chroma不直接返回分数)")
+        print(f"内容摘要: {doc.page_content[:100]}...") # 只打印前100个字
+        print(f"元数据: {doc.metadata}")
+        
+        # 检查是否是我们想要的那条规则
+        if "get_current_user" in doc.page_content:
+            print("✅✅✅ 找到了！正确规则在这里！")
+        else:
+            print("❌ 这不是我们想要的规则")
+
+if __name__ == "__main__":
+    debug_retrieval()

@@ -1,8 +1,13 @@
-# 🧬 GPT-OSS Galaxy Agent (Bioinformatics Copilot)
+code
+Markdown
+download
+content_copy
+expand_less
+# ✨ GPT-OSS Galaxy Agent (Bioinformatics Copilot)
 
 ![Ollama](https://img.shields.io/badge/Ollama-Local_AI-black?style=flat&logo=ollama)
 ![Galaxy](https://img.shields.io/badge/BioBlend-Galaxy_Project-blue)
-![Python](https://img.shields.io/badge/Backend-FastAPI-green)
+![Platform](https://img.shields.io/badge/Platform-Web%20|%20Mobile-blue)
 ![Status](https://img.shields.io/badge/Status-Active_v1.3-success)
 
 ## 📖 项目概述
@@ -55,26 +60,52 @@
 
 ![System Architecture](system_architecture.jpeg)
 
+> **流程说明**：
+> 1. **用户前端**：支持文本/拖拽/粘贴交互。
+> 2. **智能后端**：通过 FastAPI 编排 Vision 模型（看）、GPT-OSS（想）和 ChromaDB（查）。
+> 3. **执行环境**：生成的 BioBlend 脚本在本地沙箱运行，安全调用 Galaxy Server API。
 
-⚙️ 部署与使用指南
+---
+
+## ⚙️ 部署与使用指南
 1. 环境准备
 
 确保服务器已安装 Python 3.10+ 和 Ollama，并拉取以下模型：
+
+
+# 1. 主力推理模型 (负责逻辑判断与代码生成)
+```
+ollama pull gpt-oss:latest
+```
+# 2. 向量化模型 (负责 RAG 检索)
+```
+ollama pull nomic-embed-text
+```
+# 3. 视觉模型 (负责 OCR)
+```
+ollama pull llama3.2-vision:11b
+```
+
+2. 启动 Ollama 服务 (关键配置)
+
+为了支持局域网访问并允许 Web 端跨域请求，必须配置 Host 为 0.0.0.0 并允许跨域。请在服务器执行：
 
 code
 Bash
 download
 content_copy
 expand_less
-# 1. 主力推理模型 (负责逻辑判断与代码生成)
-ollama pull gpt-oss:latest
-
-# 2. 向量化模型 (负责 RAG 检索)
-ollama pull nomic-embed-text
-
-# 3. 视觉模型 (负责 OCR)
-ollama pull llama3.2-vision:11b
-2. 配置项目
+# 停止旧服务
+```
+pkill ollama
+```
+# 启动新服务 (允许所有来源跨域，监听所有网卡)
+```
+export OLLAMA_HOST=0.0.0.0
+export OLLAMA_ORIGINS="*"
+nohup ollama serve > ollama.log 2>&1 &
+```
+3. 配置项目
 
 创建 .env 文件，填入你的 Galaxy 服务器信息：
 
@@ -84,7 +115,7 @@ download
 content_copy
 expand_less
 
-3. 初始化知识库 (首次运行或更新工具时)
+4. 初始化知识库 (首次运行或更新工具时)
 
 从 Galaxy 服务器抓取最新工具列表，并构建向量索引：
 
@@ -94,18 +125,22 @@ download
 content_copy
 expand_less
 # 1. 爬取工具规则
+```
 python extract_rules.py
-
+```
 # 2. 构建向量数据库
+```
 python rebuild_db.py
-4. 启动服务
+```
+5. 启动服务
 code
 Bash
 download
 content_copy
 expand_less
+```
 python app.py
-
+```
 服务默认运行在 http://0.0.0.0:8082。
 
 🖥️ 交互场景示例
@@ -137,7 +172,25 @@ Ollama 资源：同时运行 Vision 和 LLM 模型需要一定的显存（建议
 
 安全性：生成的代码在本地沙箱执行，但仍建议不要连接生产环境的管理员账号。
 
-Maintainer: ZYZK
-Last Updated: 2025-12 (v1.3)
+🛠️ Powered By
+<p align="center">
+<img src="https://img.shields.io/badge/Python-3.10+-3776AB?style=for-the-badge&logo=python&logoColor=white" alt="Python" />
+<img src="https://img.shields.io/badge/FastAPI-Backend-009688?style=for-the-badge&logo=fastapi&logoColor=white" alt="FastAPI" />
+<img src="https://img.shields.io/badge/Ollama-Local_LLM-000000?style=for-the-badge&logo=ollama&logoColor=white" alt="Ollama" />
+</p>
+
+<p align="center">
+<img src="https://img.shields.io/badge/LangChain-RAG_Framework-1C3C3C?style=for-the-badge&logo=langchain&logoColor=white" alt="LangChain" />
+<img src="https://img.shields.io/badge/ChromaDB-Vector_Store-fc521f?style=for-the-badge&logo=chroma&logoColor=white" alt="ChromaDB" />
+<img src="https://img.shields.io/badge/Galaxy_BioBlend-Bioinformatics-2C3143?style=for-the-badge&logo=galaxy&logoColor=white" alt="Galaxy" />
+</p>
 
 
+Maintainer: Simon (Zyzk)
+Last Updated: 2025-02 (v1.3)
+
+code
+Code
+download
+content_copy
+expand_less

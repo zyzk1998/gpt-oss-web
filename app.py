@@ -49,8 +49,9 @@ class BioBlendAgent:
         self.brain = ChatOllama(model=LLM_MODEL, base_url=OLLAMA_URL, temperature=0.1)
         self.eye = ChatOllama(model=VISION_MODEL, base_url=OLLAMA_URL, temperature=0)
         
+        # Source A: 硬编码的系统常识 (内务府)
         self.system_capabilities = """
-        [Source A: Galaxy System APIs]
+        [Source A: System Kernel (Management)]
         1. Get Current User Info: gi.users.get_current_user()
         2. List Histories: gi.histories.get_histories()
         3. Upload File: gi.tools.upload_file('path', history_id)
@@ -83,52 +84,141 @@ class BioBlendAgent:
         except Exception as e:
             return f"OCR 识别失败: {str(e)}"
 
+    def _analyze_domain(self, query):
+        """
+        【第一步：领域感知总闸】
+        判断用户意图是“生信/Galaxy”还是“通用/闲聊”。
+        """
+        template = """
+        You are a classifier. Analyze the user's input and determine the **Domain**.
+        User Input: "{query}"
+        
+        Rules for [GALAXY_BIO]:
+        - Keywords: Galaxy, BioBlend, tools, fastq, bam, genome, sequencing, workflow, analysis, QC.
+        - Python code using `bioblend` or `galaxy`.
+        - Questions about bioinformatics tasks.
+        
+        Rules for [GENERAL]:
+        - General Python errors (e.g., SyntaxError, NameError, AttributeError) WITHOUT Galaxy context.
+        - General coding questions (e.g., "how to write a loop", "explain this code").
+        - Chit-chat (e.g., "hello", "who are you", "write a poem").
+        
+        Output ONLY one word: "GALAXY_BIO" or "GENERAL".
+        """
+        prompt = ChatPromptTemplate.from_template(template)
+        chain = prompt | self.brain | StrOutputParser()
+        try:
+            domain = chain.invoke({"query": query[:1000]}).strip()
+            print(f"   [感知] 领域判定: {domain}")
+            return domain
+        except:
+            return "GALAXY_BIO" # 默认兜底
+
     def smart_process(self, user_query, file_context, chat_history=[], selected_tool=None):
+        """核心逻辑：感知 -> 路由 -> 决策 -> 行动"""
         if not self.vector_db:
             return {"type": "text", "reply": "❌ 错误：知识库未加载。", "suggestions": []}
 
+        # --- 0. 强制执行通道 (点击卡片) ---
+        # 用户明确点击了工具，直接进入执行逻辑
         if selected_tool:
+            if not file_context['has_file']:
+                 return {
+                     "type": "text", 
+                     "reply": f"您选择了运行 **{selected_tool['name']}**，但这需要输入数据。\n\n请点击下方的 📂 按钮上传文件。", 
+                     "suggestions": ["如何获取示例数据？"]
+                 }
             return self._generate_code_only(user_query, file_context, selected_tool)
 
-        # RAG 流程
-        retriever = self.vector_db.as_retriever(search_kwargs={"k": 5})
-        docs = retriever.invoke(user_query)
-        retrieved_tools = "\n".join([f"- Tool {i+1}: {d.page_content}" for i, d in enumerate(docs)])
+        # --- 1. 领域感知 (Domain Perception) ---
+        domain = self._analyze_domain(user_query)
 
-        history_text = ""
-        if chat_history:
+        # --- 分支 A: 通用/闲聊模式 (General Mode) ---
+        if "GENERAL" in domain:
+            print("   [路由] 识别为通用意图 -> 旁路处理 (Skip RAG)")
+            template = """
+            You are a helpful AI Assistant.
+            User Input: "{query}"
+            History: {history}
+            
+            Task: Answer the user's question directly using your general knowledge.
+            - If it's a general Python error, explain the fix.
+            - If it's chat, reply naturally.
+            - **Language**: Follow user's language (Chinese -> Chinese).
+            """
+            history_text = "\n".join([f"User: {h.get('user','')}\nAI: {h.get('ai','')}" for h in chat_history[-3:]])
+            prompt = ChatPromptTemplate.from_template(template)
+            chain = prompt | self.brain | StrOutputParser()
+            response = chain.invoke({"query": user_query, "history": history_text})
+            
+            # 通用模式下不生成复杂的生信建议
+            return {"type": "text", "reply": response, "suggestions": []}
+
+        # --- 分支 B: 生信/Galaxy 专家模式 (Expert Mode) ---
+        else:
+            print("   [路由] 识别为 Galaxy 意图 -> 启动 RAG 路由引擎")
+            
+            # 2. 检索 (Source B: 兵器库)
+            retriever = self.vector_db.as_retriever(search_kwargs={"k": 5})
+            docs = retriever.invoke(user_query)
+            retrieved_tools = "\n".join([f"- {d.page_content}" for i, d in enumerate(docs)])
+
+            # 3. 历史上下文
             history_text = "\n".join([f"User: {h.get('user','')}\nAI: {h.get('ai','')}" for h in chat_history[-3:]])
 
-        template = """
-        You are a Galaxy BioBlend Expert. 
-        【Language Rules】Follow User's Language (Chinese -> Chinese).
-        【History】{history}
-        【Request】User: "{query}" | File: {file_context}
-        【Knowledge】{system_caps}
-        [Source B] {retrieved_tools}
-        
-        【Decision Logic】
-        1. System API -> Code.
-        2. Tool Run -> Code.
-        3. Missing File -> Reply "Please upload file first" in Chinese.
-        4. Ambiguous -> JSON List.
-        5. Chat -> Natural answer.
-        
-        【Output】Code: ```python ... ``` | List: ```json ... ``` | Text: Plain text.
-        """
-        
-        prompt = ChatPromptTemplate.from_template(template)
-        chain = prompt | self.brain | StrOutputParser()
-        
-        response = chain.invoke({
-            "query": user_query,
-            "file_context": str(file_context),
-            "system_caps": self.system_capabilities,
-            "retrieved_tools": retrieved_tools,
-            "history": history_text
-        })
-        
-        return self._parse_llm_response(response, context="chat")
+            # 4. 专家决策 Prompt (Source A vs Source B)
+            template = """
+            You are the intelligent router for the Galaxy Bioinformatics System.
+            Your task is to map the User's Intent to the correct Knowledge Source (A or B) and execute the action.
+            
+            【Current Context】
+            - User Input: "{query}"
+            - File Status: {file_context}
+            - History: {history}
+            
+            【Available Knowledge Sources】
+            
+            🔷 **SOURCE A: System Kernel (Management)**
+            *Use this ONLY for account info, history lists, or connection checks.*
+            {system_caps}
+            
+            🔶 **SOURCE B: Tool Library (Analysis)**
+            *Use this for ANY data processing, quality control, assembly, or tool recommendations.*
+            {retrieved_tools}
+            
+            【Routing & Decision Logic】
+            
+            1. **Analyze Intent**: 
+               - Is the user asking about *System Status* (Who am I? What history?) -> **Route to Source A**.
+               - Is the user asking about *Bio-Analysis* (How to QC? Run SPAdes?) -> **Route to Source B**.
+            
+            2. **Determine Action**:
+               - **Consultation (咨询)**: User asks "how to" or "recommend". (Route: Source B) -> Return **JSON List**.
+               - **Execution (执行)**: User says "run/execute". (Route: Source B) -> Check File -> Return **Python Code**.
+               - **Management (管理)**: User asks info. (Route: Source A) -> Return **Python Code**.
+            
+            3. **Safety Check**:
+               - If routing to Execution but file is missing -> Reply "Please upload file" (in Chinese).
+            
+            【Output Format】
+            - Code: ```python ... ```
+            - List: ```json ... ```
+            - Text: Plain text (Chinese).
+            """
+            
+            prompt = ChatPromptTemplate.from_template(template)
+            chain = prompt | self.brain | StrOutputParser()
+            
+            print("   [推理] gpt-oss 正在进行意图路由与决策...")
+            response = chain.invoke({
+                "query": user_query,
+                "file_context": str(file_context),
+                "system_caps": self.system_capabilities,
+                "retrieved_tools": retrieved_tools,
+                "history": history_text
+            })
+            
+            return self._parse_llm_response(response, context="chat")
 
     def _generate_code_only(self, query, file_context, tool_info):
         template = """
@@ -148,40 +238,36 @@ class BioBlendAgent:
         return self._parse_llm_response(response, context="execution")
 
     def _parse_llm_response(self, response, context="chat"):
-        """解析响应并生成引导建议"""
         response = response.strip()
         suggestions = []
-
-        # 1. 代码执行结果
+        
+        # 1. 代码执行
         if "```python" in response:
             code = response.split("```python")[1].split("```")[0].strip()
             exec_out = self._execute_code_sandbox(code)
             final_reply = f"### 🤖 策略代码\n```python\n{code}\n```\n### ✅ 执行结果\n```text\n{exec_out}\n```"
-            
-            # 【新增】生成引导建议
-            suggestions = [
-                "能解释一下这个结果吗？",
-                "如何将这些数据可视化？",
-                "帮我把结果保存到本地"
-            ]
+            suggestions = ["能解释一下这个结果吗？", "如何将这些数据可视化？", "保存结果到本地"]
             return {"type": "text", "reply": final_reply, "suggestions": suggestions}
         
-        # 2. 工具选择列表
+        # 2. 工具列表 (咨询模式)
         elif "```json" in response:
             try:
                 candidates = json.loads(response.split("```json")[1].split("```")[0].strip())
-                return {"type": "choice", "reply": "找到多个相关工具，请选择：", "candidates": candidates, "suggestions": []}
+                return {
+                    "type": "choice", 
+                    "reply": "根据您的需求，我为您找到了以下工具。请选择一个开始：", 
+                    "candidates": candidates, 
+                    "suggestions": ["这些工具的区别是什么？", "我该准备什么格式的数据？"]
+                }
             except:
                 return {"type": "text", "reply": response, "suggestions": []}
         
-        # 3. 纯文本 (可能是缺文件提示，或者闲聊)
+        # 3. 纯文本
         else:
-            # 简单的关键词匹配来生成建议
             if "上传" in response or "upload" in response.lower():
                 suggestions = ["如何获取示例数据？", "支持哪些文件格式？"]
             elif "历史" in response:
                 suggestions = ["列出最近的 dataset", "清理历史记录"]
-            
             return {"type": "text", "reply": response, "suggestions": suggestions}
 
     def _execute_code_sandbox(self, code):
@@ -216,16 +302,16 @@ async def upload_handler(file: UploadFile = File(...)):
         temp_path = f"temp_{file.filename}"
         with open(temp_path, "wb") as buffer:
             shutil.copyfileobj(file.file, buffer)
-            
         result = {"status": "success", "file_name": file.filename}
         
+        # 图片 -> OCR
         if file.filename.lower().endswith(('.png', '.jpg', '.jpeg', '.bmp', '.webp')):
             ocr_text = agent.ocr_image(temp_path)
             result["type"] = "image"
             result["ocr_text"] = ocr_text
-            # 图片识别后的建议
             result["suggestions"] = ["提取其中的序列信息", "解释报错原因", "翻译成中文"]
             os.remove(temp_path) 
+        # 数据 -> Galaxy
         else:
             if gi:
                 histories = gi.histories.get_histories()
@@ -233,7 +319,6 @@ async def upload_handler(file: UploadFile = File(...)):
                 ret = gi.tools.upload_file(temp_path, hid)
                 result["type"] = "data"
                 result["file_id"] = ret['outputs'][0]['id']
-                # 数据上传后的建议
                 result["suggestions"] = ["对这个文件做质控", "查看文件前10行", "比对到参考基因组"]
                 os.remove(temp_path)
             else:
@@ -245,11 +330,7 @@ async def upload_handler(file: UploadFile = File(...)):
 
 @app.post("/api/chat")
 async def chat_handler(req: ChatRequest):
-    file_ctx = {
-        "has_file": bool(req.uploaded_file_id),
-        "file_id": req.uploaded_file_id,
-        "file_name": req.uploaded_file_name
-    }
+    file_ctx = {"has_file": bool(req.uploaded_file_id), "file_id": req.uploaded_file_id, "file_name": req.uploaded_file_name}
     response = agent.smart_process(req.message, file_ctx, req.history, req.selected_tool)
     return response
 

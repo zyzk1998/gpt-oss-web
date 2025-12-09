@@ -9,7 +9,8 @@ import shutil
 import time
 import re
 from fastapi import FastAPI, Request, UploadFile, File
-from fastapi.responses import JSONResponse
+# 【核心修复】同时引入 HTMLResponse 和 JSONResponse
+from fastapi.responses import HTMLResponse, JSONResponse
 from fastapi.templating import Jinja2Templates
 from pydantic import BaseModel
 from typing import List, Optional, Union, Dict, Any
@@ -111,7 +112,7 @@ class BioBlendAgent:
         template = """
         You are a classifier. Analyze the user's input and determine the **Domain**.
         User Input: "{query}"
-        Rules for [GALAXY_BIO]: Keywords: Galaxy, BioBlend, tools, fastq, bam, genome, sequencing, workflow, analysis, QC, Seurat, account, history.
+        Rules for [GALAXY_BIO]: Keywords: Galaxy, BioBlend, tools, fastq, bam, genome, sequencing, workflow, analysis, QC, Seurat.
         Rules for [GENERAL]: General Python errors, Chit-chat.
         Output ONLY one word: "GALAXY_BIO" or "GENERAL".
         """
@@ -122,7 +123,7 @@ class BioBlendAgent:
         except:
             return "GALAXY_BIO"
 
-    # 【新增】前置意图分类器：决定是“查工具”还是“执行/管理”
+    # 前置意图分类器
     def _classify_bio_intent(self, query):
         template = """
         Classify the user's intent into one of two categories:
@@ -141,7 +142,7 @@ class BioBlendAgent:
             if "CONSULTATION" in intent: return "CONSULTATION"
             return "EXECUTION"
         except:
-            return "EXECUTION" # 默认偏向执行
+            return "EXECUTION" 
 
     def _identify_tool_key(self, tool_name):
         name = tool_name.lower()
@@ -186,15 +187,14 @@ class BioBlendAgent:
             response = chain.invoke({"query": user_query, "history": history_text})
             return self._parse_llm_response(response, context="chat", user_query=user_query)
 
-        # 分支 B: 生信/Galaxy 专家 (这里开始真正的逻辑分流)
+        # 分支 B: 生信/Galaxy 专家
         else:
-            # 【核心修改】先判断意图，再决定是否检索
+            # 前置意图分流
             bio_intent = self._classify_bio_intent(user_query)
             history_text = "\n".join([f"User: {h.get('user','')}\nAI: {h.get('ai','')}" for h in chat_history[-3:]])
 
             if bio_intent == "CONSULTATION":
                 # === 分流 1: 咨询模式 (查工具) ===
-                # 只有这里才做 RAG 检索
                 retriever = self.vector_db.as_retriever(search_kwargs={"k": 25})
                 docs = retriever.invoke(user_query)
                 self.current_docs = docs 
@@ -223,9 +223,6 @@ class BioBlendAgent:
                 
             else:
                 # === 分流 2: 执行/管理模式 (查账户、跑任务) ===
-                # 【关键】完全跳过 RAG，不给 LLM 灌输工具列表，只给系统能力
-                # 这样 LLM 就不会产生“我要列出工具”的幻觉
-                
                 template = """
                 You are a Galaxy System Executor.
                 User Request: "{query}"

@@ -1,0 +1,561 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Galaxy AI Studio</title>
+    <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/css/bootstrap.min.css" rel="stylesheet">
+    <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/bootstrap-icons@1.11.0/font/bootstrap-icons.css">
+    <script src="https://cdn.jsdelivr.net/npm/marked/marked.min.js"></script>
+    
+    <style>
+        :root {
+            --bg-color: #ffffff;
+            --chat-width: 800px;
+            --primary-color: #4d6bfe;
+            --text-color: #1f1f1f;
+            --thought-bg: #fcfcfc;
+            --thought-border: #f0f0f0;
+        }
+
+        body {
+            background-color: var(--bg-color);
+            font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
+            height: 100vh;
+            display: flex;
+            flex-direction: column;
+            margin: 0;
+            overflow: hidden;
+            color: var(--text-color);
+        }
+
+        /* 顶部导航 */
+        .navbar {
+            background: rgba(255,255,255,0.9);
+            backdrop-filter: blur(10px);
+            position: absolute; top: 0; width: 100%; z-index: 10;
+            padding: 12px 0;
+            border-bottom: 1px solid rgba(0,0,0,0.03);
+        }
+        .brand-logo { font-weight: 600; font-size: 1.1rem; color: #333; display: flex; align-items: center; gap: 8px; }
+
+        /* 聊天区域 */
+        .chat-scroll-area {
+            flex: 1;
+            overflow-y: auto;
+            padding: 80px 20px 150px 20px;
+            scroll-behavior: smooth;
+        }
+        .chat-content { max-width: var(--chat-width); margin: 0 auto; }
+
+        /* 消息行 */
+        .message-row { display: flex; margin-bottom: 24px; animation: fadeIn 0.2s ease; }
+        .message-row.user { justify-content: flex-end; }
+        
+        .avatar {
+            width: 32px; height: 32px; border-radius: 6px; margin-right: 12px;
+            display: flex; align-items: center; justify-content: center;
+            font-size: 18px; flex-shrink: 0; margin-top: 2px;
+        }
+        .avatar.ai { background: #eef2ff; color: var(--primary-color); }
+        
+        .message-container { max-width: 100%; flex: 1; min-width: 0; }
+        .message-row.user .message-container { flex: initial; max-width: 85%; display: flex; flex-direction: column; align-items: flex-end; }
+
+        .bubble { font-size: 15px; line-height: 1.6; color: #374151; }
+        .message-row.user .bubble {
+            background-color: #f4f4f4;
+            color: #000;
+            padding: 10px 16px;
+            border-radius: 18px;
+            border-bottom-right-radius: 4px;
+            text-align: left;
+        }
+
+        /* 用户消息操作栏 */
+        .user-actions {
+            display: flex; gap: 16px; margin-top: 6px; opacity: 0; transition: opacity 0.2s;
+            padding-right: 4px;
+        }
+        .message-row.user:hover .user-actions { opacity: 1; }
+        
+        .action-item {
+            display: flex; align-items: center; gap: 4px;
+            font-size: 12px; color: #999; cursor: pointer; transition: color 0.2s;
+        }
+        .action-item:hover { color: #333; }
+        .action-item i { font-size: 13px; }
+
+        /* 深度思考框 */
+        .thought-block {
+            margin-bottom: 12px;
+            border-radius: 8px;
+            background: var(--thought-bg);
+            border: 1px solid var(--thought-border);
+            overflow: hidden;
+        }
+        .thought-header {
+            padding: 8px 12px; cursor: pointer; display: flex; align-items: center; justify-content: space-between;
+            font-size: 13px; font-weight: 600; color: #6b7280;
+            background: #fcfcfc; user-select: none; transition: background 0.2s;
+        }
+        .thought-header:hover { background: #f0f0f0; }
+        .thought-title { display: flex; align-items: center; gap: 8px; }
+        .thought-icon { color: #ff9800; font-size: 14px; }
+        .thought-content {
+            padding: 12px; border-top: 1px solid var(--thought-border);
+            background: #ffffff; color: #4b5563; font-size: 13px; line-height: 1.6;
+            display: none; white-space: pre-wrap;
+        }
+        .thought-arrow { transition: transform 0.3s ease; font-size: 12px; color: #9ca3af; }
+        .thought-arrow.open { transform: rotate(180deg); }
+
+        /* 结果表格 */
+        .props-panel {
+            border: 1px solid #e5e7eb; border-radius: 8px; overflow: hidden; margin-top: 10px; font-size: 13px;
+        }
+        .prop-row { display: flex; border-bottom: 1px solid #f3f4f6; }
+        .prop-row:last-child { border-bottom: none; }
+        .prop-row:nth-child(even) { background-color: #f9fafb; }
+        .prop-key { width: 30%; padding: 8px 12px; font-weight: 600; color: #4b5563; background: #fdfdfd; border-right: 1px solid #f3f4f6; }
+        .prop-value { width: 70%; padding: 8px 12px; color: #111827; font-family: 'Menlo', monospace; word-break: break-all; }
+
+        /* 代码折叠 */
+        .code-collapse-btn {
+            background: #f3f4f6; border: none; border-radius: 6px;
+            padding: 6px 12px; font-size: 12px; color: #6b7280;
+            cursor: pointer; display: flex; align-items: center; gap: 6px;
+            margin-bottom: 8px; width: fit-content; transition: 0.2s;
+        }
+        .code-collapse-btn:hover { background: #e5e7eb; color: #374151; }
+        .code-block-container { display: none; margin-bottom: 12px; }
+
+        /* 工具网格 */
+        .tool-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(220px, 1fr)); gap: 10px; margin-top: 10px; }
+        .tool-card {
+            background: #fff; border: 1px solid #e5e7eb; border-radius: 8px; padding: 12px 16px;
+            cursor: pointer; transition: all 0.2s; position: relative; overflow: hidden;
+            display: flex; align-items: center; min-height: 50px;
+        }
+        .tool-card:hover { border-color: var(--primary-color); box-shadow: 0 4px 12px rgba(0,0,0,0.05); }
+        .tool-card strong { font-size: 14px; color: #111827; margin: 0; }
+
+        /* 输入框区域 */
+        .input-wrapper {
+            position: fixed; bottom: 30px; left: 0; width: 100%;
+            display: flex; justify-content: center; padding: 0 20px;
+            z-index: 100; pointer-events: none;
+        }
+        .chat-input-panel {
+            pointer-events: auto; width: 100%; max-width: var(--chat-width);
+            background: #fff; border: 1px solid #e6e6e6; border-radius: 20px;
+            box-shadow: 0 4px 20px rgba(0, 0, 0, 0.05); 
+            padding: 10px 14px;
+            display: flex; flex-direction: column; transition: box-shadow 0.2s;
+        }
+        .chat-input-panel:focus-within { box-shadow: 0 8px 25px rgba(0, 0, 0, 0.1); border-color: #d0d0d0; }
+        
+        .input-area { width: 100%; margin-bottom: 4px; display: flex; align-items: center; }
+        
+        .main-input {
+            width: 100%; border: none; outline: none; font-size: 16px; line-height: 1.5;
+            resize: none; color: #333; background: transparent; font-family: inherit;
+            max-height: 200px; overflow-y: hidden;
+            padding: 0; margin: 0;
+            box-sizing: border-box;
+        }
+        .main-input::placeholder { color: #aaa; }
+        .main-input:disabled { background: transparent; cursor: not-allowed; color: #999; }
+
+        .toolbar { display: flex; justify-content: space-between; align-items: center; margin-top: 4px; }
+        .toolbar-left { display: flex; gap: 10px; }
+        .toolbar-right { display: flex; align-items: center; gap: 10px; }
+
+        .icon-btn {
+            width: 34px; height: 34px; border-radius: 8px; border: none; background: transparent;
+            color: #666; display: flex; align-items: center; justify-content: center;
+            cursor: pointer; transition: background 0.2s, color 0.2s; font-size: 18px;
+        }
+        .icon-btn:hover { background: #f5f5f5; color: #333; }
+        .icon-btn:disabled { cursor: not-allowed; opacity: 0.5; }
+
+        .send-btn {
+            width: 34px; height: 34px; border-radius: 50%; background: #e5e5e5; color: #fff;
+            border: none; display: flex; align-items: center; justify-content: center;
+            cursor: not-allowed; transition: all 0.2s;
+        }
+        .send-btn.active { background: #333; cursor: pointer; }
+        .send-btn i { font-size: 16px; }
+
+        .file-chips-area { display: flex; flex-wrap: wrap; gap: 8px; margin-bottom: 4px; }
+        .file-chip {
+            background: #f7f7f7; border: 1px solid #eee; border-radius: 6px;
+            padding: 2px 8px; font-size: 12px; color: #555; display: flex; align-items: center; gap: 6px;
+        }
+
+        #dropOverlay {
+            position: fixed; top: 0; left: 0; width: 100%; height: 100%;
+            background: rgba(255,255,255,0.95); z-index: 999;
+            display: none; flex-direction: column; justify-content: center; align-items: center;
+            color: var(--primary-color);
+        }
+        @keyframes fadeIn { from { opacity: 0; transform: translateY(10px); } to { opacity: 1; transform: translateY(0); } }
+    </style>
+</head>
+<body>
+
+    <div id="dropOverlay">
+        <i class="bi bi-cloud-upload" style="font-size: 48px; margin-bottom: 10px;"></i>
+        <h4>释放文件以上传</h4>
+    </div>
+
+    <nav class="navbar">
+        <div class="container d-flex justify-content-center">
+            <div class="brand-logo"><i class="bi bi-stars" style="color: var(--primary-color);"></i> GPT-OSS Galaxy</div>
+        </div>
+    </nav>
+
+    <div class="chat-scroll-area" id="chatBox">
+        <div class="chat-content" id="chatContent">
+            <!-- 开场白 -->
+            <div class="message-row ai">
+                <div class="avatar ai"><i class="bi bi-robot"></i></div>
+                <div class="message-container">
+                    <div class="bubble">
+                        <p>你好！我是你的 <b>Galaxy 生信智能助手</b>。</p>
+                        <p>我可以帮你查询工具、上传数据并生成分析代码。试着问我：</p>
+                        <ul>
+                            <li>"列出所有 Seurat 相关的工具"</li>
+                            <li>"查询我的账户信息"</li>
+                        </ul>
+                    </div>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <div class="input-wrapper">
+        <div class="chat-input-panel">
+            <div id="filePreviewArea" class="file-chips-area"></div>
+            <div class="input-area">
+                <textarea id="userInput" class="main-input" placeholder="尽管问..." rows="1" oninput="autoResize(this); checkInput();" onkeydown="handleEnter(event)"></textarea>
+            </div>
+            <div class="toolbar">
+                <div class="toolbar-left"></div>
+                <div class="toolbar-right">
+                    <input type="file" id="fileInput" style="display: none;" onchange="handleFileSelect(this.files)" multiple>
+                    <button id="uploadBtn" class="icon-btn" onclick="document.getElementById('fileInput').click()" title="上传文件">
+                        <i class="bi bi-paperclip"></i>
+                    </button>
+                    <button id="sendBtn" class="send-btn" onclick="sendMessage()">
+                        <i class="bi bi-arrow-up"></i>
+                    </button>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <script>
+        const chatContent = document.getElementById('chatContent');
+        const chatScrollArea = document.getElementById('chatBox');
+        const userInput = document.getElementById('userInput');
+        const sendBtn = document.getElementById('sendBtn');
+        const uploadBtn = document.getElementById('uploadBtn');
+        const filePreviewArea = document.getElementById('filePreviewArea');
+        const dropOverlay = document.getElementById('dropOverlay');
+
+        let chatHistory = []; 
+        let uploadedFiles = []; 
+        let isProcessing = false; 
+
+        function autoResize(textarea) {
+            textarea.style.height = 'auto';
+            textarea.style.height = textarea.scrollHeight + 'px';
+            if (textarea.scrollHeight > 200) {
+                textarea.style.overflowY = "auto";
+            } else {
+                textarea.style.overflowY = "hidden";
+            }
+        }
+        window.onload = () => autoResize(userInput);
+
+        function checkInput() {
+            if (isProcessing) { sendBtn.classList.remove('active'); return; }
+            if (userInput.value.trim() !== '' || uploadedFiles.length > 0) sendBtn.classList.add('active');
+            else sendBtn.classList.remove('active');
+        }
+
+        function handleEnter(e) { 
+            if (e.key === 'Enter' && !e.shiftKey) {
+                e.preventDefault();
+                if (!isProcessing) sendMessage();
+            }
+        }
+
+        function toggleLoadingState(isLoading) {
+            isProcessing = isLoading;
+            userInput.disabled = isLoading;
+            uploadBtn.disabled = isLoading;
+            if (isLoading) {
+                sendBtn.disabled = true; sendBtn.classList.remove('active'); userInput.style.cursor = 'wait';
+            } else {
+                sendBtn.disabled = false; userInput.style.cursor = 'text'; userInput.focus(); checkInput();
+            }
+        }
+
+        window.addEventListener('dragenter', (e) => { if(!isProcessing) { e.preventDefault(); dropOverlay.style.display = 'flex'; } });
+        window.addEventListener('dragleave', (e) => { e.preventDefault(); if (e.clientX === 0 && e.clientY === 0) dropOverlay.style.display = 'none'; });
+        window.addEventListener('dragover', (e) => e.preventDefault());
+        window.addEventListener('drop', (e) => { e.preventDefault(); dropOverlay.style.display = 'none'; if (!isProcessing && e.dataTransfer.files.length > 0) handleFileSelect(e.dataTransfer.files); });
+        window.addEventListener('paste', (e) => { if (!isProcessing && e.clipboardData.files.length > 0) { e.preventDefault(); handleFileSelect(e.clipboardData.files); } });
+
+        async function handleFileSelect(files) {
+            if (files.length === 0) return;
+            toggleLoadingState(true);
+            for (let i = 0; i < files.length; i++) await uploadSingleFile(files[i]);
+            document.getElementById('fileInput').value = ''; 
+            toggleLoadingState(false);
+        }
+
+        async function uploadSingleFile(file) {
+            const tempId = 'temp-' + Date.now();
+            addFileTag(file.name, true, tempId);
+            const formData = new FormData();
+            formData.append('file', file);
+            try {
+                const res = await fetch('/api/upload', { method: 'POST', body: formData });
+                const data = await res.json();
+                removeFileTag(tempId);
+                if (data.status === 'success') {
+                    uploadedFiles.push({ id: data.file_id, name: data.file_name });
+                    renderFileTags();
+                } else alert(`上传失败: ${data.message}`);
+            } catch (e) { removeFileTag(tempId); alert(`网络错误: ${e}`); }
+        }
+
+        function renderFileTags() {
+            filePreviewArea.innerHTML = '';
+            uploadedFiles.forEach((f, index) => {
+                const div = document.createElement('div');
+                div.className = 'file-chip';
+                div.innerHTML = `<i class="bi bi-file-earmark-text"></i><span>${f.name}</span><i class="bi bi-x" style="cursor:pointer" onclick="removeFile(${index})"></i>`;
+                filePreviewArea.appendChild(div);
+            });
+        }
+        function addFileTag(name, isLoading, tempId) {
+            const div = document.createElement('div');
+            div.className = 'file-chip'; div.id = tempId;
+            div.innerHTML = `<i class="bi bi-${isLoading ? 'hourglass-split' : 'file-earmark-text'}"></i><span>${name} ${isLoading ? '(上传中...)' : ''}</span>`;
+            filePreviewArea.appendChild(div);
+        }
+        function removeFileTag(id) { const el = document.getElementById(id); if (el) el.remove(); }
+        function removeFile(index) { if(!isProcessing) { uploadedFiles.splice(index, 1); renderFileTags(); checkInput(); } }
+
+        async function sendMessage(selectedTool = null, originalQuery = null) {
+            if (isProcessing) return;
+            let text = userInput.value.trim();
+            if (selectedTool) text = originalQuery;
+            else if (!text && uploadedFiles.length === 0) return;
+
+            if (!selectedTool) {
+                appendMessage('user', text || `[发送了 ${uploadedFiles.length} 个文件]`);
+                userInput.value = ''; userInput.style.height = 'auto'; 
+                checkInput();
+            }
+
+            toggleLoadingState(true);
+            const loadingId = 'loading-' + Date.now();
+            appendLoadingMessage(loadingId);
+            const startTime = Date.now();
+
+            const payload = { message: text, history: chatHistory, selected_tool: selectedTool, uploaded_files: uploadedFiles };
+            
+            try {
+                const res = await fetch('/api/chat', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(payload) });
+                if (!res.ok) throw new Error(await res.text());
+                const data = await res.json();
+                document.getElementById(loadingId).remove();
+                const duration = ((Date.now() - startTime) / 1000).toFixed(1);
+
+                if (data.type === 'choice') {
+                    let html = `<p>${data.reply}</p><div class="tool-grid">`;
+                    data.candidates.forEach((tool, index) => {
+                        const name = tool.name || "Unknown Tool";
+                        const id = tool.id || ""; 
+                        const toolStr = JSON.stringify(tool).replace(/"/g, '&quot;');
+                        html += `<div class="tool-card" onclick="selectTool(${toolStr}, '${text}')"><i class="bi bi-box-seam" style="position:absolute; right:-5px; bottom:-5px; font-size:50px; opacity:0.05;"></i><strong>${index + 1}. ${name}</strong></div>`;
+                    });
+                    html += `</div>`;
+                    appendMessage('ai', html, data.thought, duration);
+                } else {
+                    let content = data.reply;
+                    let codeBlock = "";
+                    if (content.includes("### 🤖 策略代码")) {
+                        const parts = content.split("### 🤖 策略代码");
+                        const preText = parts[0];
+                        const codeAndResult = parts[1];
+                        const codeMatch = codeAndResult.match(/```python([\s\S]*?)```/);
+                        if (codeMatch) codeBlock = codeMatch[1].trim();
+                        
+                        let resultText = "";
+                        if (codeAndResult.includes("### ✅ 执行结果")) {
+                            const resultParts = codeAndResult.split("### ✅ 执行结果");
+                            const rawResult = resultParts[1].match(/```text([\s\S]*?)```/);
+                            if (rawResult) resultText = rawResult[1].trim();
+                        }
+
+                        let finalHtml = marked.parse(preText);
+                        if (codeBlock) {
+                            finalHtml += `<button class="code-collapse-btn" onclick="toggleCode(this)"><i class="bi bi-code-slash"></i> 查看策略代码</button><div class="code-block-container"><pre><code class="language-python">${codeBlock}</code></pre></div>`;
+                        }
+                        if (resultText) finalHtml += formatExecutionResult(resultText);
+                        content = finalHtml;
+                    } else {
+                        content = marked.parse(content);
+                    }
+
+                    const msgDiv = appendMessage('ai', content, data.thought, duration, true);
+                    chatHistory.push({ user: text, ai: data.reply });
+                }
+            } catch (error) {
+                document.getElementById(loadingId).remove();
+                appendMessage('ai', `<span style="color:red">请求失败: ${error}</span>`);
+            } finally { toggleLoadingState(false); }
+        }
+
+        function formatExecutionResult(text) {
+            text = text.trim();
+            let tableHtml = '<div class="props-panel">';
+            let hasData = false;
+
+            if (text.startsWith('{') && text.endsWith('}')) {
+                try {
+                    let jsonStr = text.replace(/'/g, '"').replace(/\bFalse\b/g, 'false').replace(/\bTrue\b/g, 'true').replace(/\bNone\b/g, 'null');
+                    const obj = JSON.parse(jsonStr);
+                    for (const [key, value] of Object.entries(obj)) {
+                        hasData = true;
+                        const displayValue = (typeof value === 'object' && value !== null) ? JSON.stringify(value) : value;
+                        tableHtml += `<div class="prop-row"><div class="prop-key">${key}</div><div class="prop-value">${displayValue}</div></div>`;
+                    }
+                } catch (e) { console.warn("Dict parse failed"); }
+            }
+
+            if (!hasData) {
+                const lines = text.split('\n');
+                lines.forEach(line => {
+                    const match = line.match(/^\s*([^:]+):\s*(.*)$/);
+                    if (match) {
+                        hasData = true;
+                        tableHtml += `<div class="prop-row"><div class="prop-key">${match[1].trim()}</div><div class="prop-value">${match[2].trim()}</div></div>`;
+                    }
+                });
+            }
+            
+            tableHtml += '</div>';
+            return hasData ? `<h6>✅ 执行结果</h6>${tableHtml}` : `<h6>✅ 执行结果</h6><pre>${text}</pre>`;
+        }
+
+        function toggleCode(btn) {
+            const container = btn.nextElementSibling;
+            if (container.style.display === 'block') {
+                container.style.display = 'none';
+                btn.innerHTML = '<i class="bi bi-code-slash"></i> 查看策略代码';
+            } else {
+                container.style.display = 'block';
+                btn.innerHTML = '<i class="bi bi-chevron-up"></i> 收起代码';
+            }
+        }
+
+        function appendMessage(role, content, thoughtContent = null, duration = null, isHtml = false) {
+            const row = document.createElement('div');
+            row.className = `message-row ${role}`;
+            let avatarHtml = role === 'ai' ? `<div class="avatar ai"><i class="bi bi-robot"></i></div>` : '';
+            let thoughtHtml = '';
+            if (role === 'ai' && thoughtContent) {
+                thoughtHtml = `<div class="thought-block"><div class="thought-header" onclick="toggleThought(this)"><div class="thought-title"><i class="bi bi-stars thought-icon"></i> 深度思考过程</div><i class="bi bi-chevron-down thought-arrow"></i></div><div class="thought-content">${marked.parse(thoughtContent)}</div></div>`;
+            }
+            let footerHtml = '';
+            if (role === 'ai' && duration) {
+                footerHtml = `<div style="margin-top:5px; font-size:12px; color:#999; display:flex; gap:10px;"><span>${duration}s</span><i class="bi bi-copy" style="cursor:pointer" onclick="copyText(this)"></i></div>`;
+            }
+            
+            let userActionsHtml = '';
+            if (role === 'user') {
+                userActionsHtml = `
+                <div class="user-actions">
+                    <div class="action-item" onclick="editMessage(this)">
+                        <i class="bi bi-pencil"></i> 编辑
+                    </div>
+                    <div class="action-item" onclick="copyText(this)">
+                        <i class="bi bi-copy"></i> 复制
+                    </div>
+                </div>`;
+            }
+
+            const bubbleContent = isHtml ? content : marked.parse(content);
+            row.innerHTML = `${role === 'ai' ? avatarHtml : ''}<div class="message-container">${thoughtHtml}<div class="bubble">${bubbleContent}</div>${userActionsHtml}${footerHtml}</div>`;
+            chatContent.appendChild(row);
+            scrollToBottom();
+            return row.querySelector('.bubble');
+        }
+
+        function toggleThought(header) {
+            const content = header.nextElementSibling;
+            const icon = header.querySelector('.bi-chevron-down');
+            if (content.style.display === 'block') {
+                content.style.display = 'none';
+                icon.style.transform = 'rotate(0deg)';
+            } else {
+                content.style.display = 'block';
+                icon.style.transform = 'rotate(180deg)';
+            }
+        }
+
+        function copyText(btn) {
+            let text = "";
+            const container = btn.closest('.message-container');
+            if (container) {
+                text = container.querySelector('.bubble').innerText;
+            }
+            
+            if (navigator.clipboard && window.isSecureContext) {
+                navigator.clipboard.writeText(text).then(() => {
+                    const icon = btn.querySelector('i');
+                    if(icon) {
+                        const originalClass = icon.className;
+                        icon.className = 'bi bi-check';
+                        setTimeout(() => icon.className = originalClass, 2000);
+                    }
+                });
+            } else {
+                const textArea = document.createElement("textarea");
+                textArea.value = text;
+                textArea.style.position = "fixed"; textArea.style.left = "-9999px";
+                document.body.appendChild(textArea); textArea.focus(); textArea.select();
+                try { document.execCommand('copy'); } catch (err) {}
+                document.body.removeChild(textArea);
+            }
+        }
+
+        function editMessage(btn) {
+            const container = btn.closest('.message-container');
+            const text = container.querySelector('.bubble').innerText;
+            userInput.value = text;
+            userInput.focus();
+            autoResize(userInput);
+            checkInput();
+        }
+
+        function appendLoadingMessage(id) {
+            const row = document.createElement('div');
+            row.className = `message-row ai`; row.id = id;
+            row.innerHTML = `<div class="avatar ai"><i class="bi bi-robot"></i></div><div class="message-container"><div class="bubble"><div class="spinner-border spinner-border-sm text-primary" role="status"></div><span style="margin-left:8px; color:#666;">思考中...</span></div></div>`;
+            chatContent.appendChild(row);
+            scrollToBottom();
+        }
+
+        function selectTool(tool, query) { appendMessage('user', `我选择运行: <b>${tool.name}</b>`); sendMessage(tool, query); }
+        function scrollToBottom() { chatScrollArea.scrollTop = chatScrollArea.scrollHeight; }
+    </script>
+</body>
+</html>

@@ -9,7 +9,6 @@ import shutil
 import time
 import re
 from fastapi import FastAPI, Request, UploadFile, File
-# 【核心修复】同时引入 HTMLResponse 和 JSONResponse
 from fastapi.responses import HTMLResponse, JSONResponse
 from fastapi.templating import Jinja2Templates
 from pydantic import BaseModel
@@ -123,24 +122,27 @@ class BioBlendAgent:
         except:
             return "GALAXY_BIO"
 
-    # 前置意图分类器
     def _classify_bio_intent(self, query):
+        query_lower = query.lower()
+        if any(k in query_lower for k in ["账户", "account", "user", "用户", "history", "历史", "run", "运行", "执行", "upload", "上传"]):
+            print(f"   [路由] 规则命中 -> EXECUTION (执行/管理)")
+            return "EXECUTION"
+        if any(k in query_lower for k in ["列出", "list", "find", "search", "查找", "工具", "tools", "help", "怎么", "how to", "推荐"]):
+            print(f"   [路由] 规则命中 -> CONSULTATION (咨询/检索)")
+            return "CONSULTATION"
+
         template = """
         Classify the user's intent into one of two categories:
-        
-        1. **CONSULTATION**: User wants to find, list, or recommend tools. (e.g., "List Seurat tools", "How to do QC?")
-        2. **EXECUTION**: User wants to check system status, account info, or run a specific task. (e.g., "Check my account", "Run PCA", "Show history")
-        
+        1. **CONSULTATION**: User wants to find, list, or recommend tools.
+        2. **EXECUTION**: User wants to check system status or run a task.
         User Input: "{query}"
-        
         Output ONLY one word: "CONSULTATION" or "EXECUTION".
         """
         prompt = ChatPromptTemplate.from_template(template)
         chain = prompt | self.brain | StrOutputParser()
         try:
             intent = chain.invoke({"query": query}).strip().upper()
-            if "CONSULTATION" in intent: return "CONSULTATION"
-            return "EXECUTION"
+            return "CONSULTATION" if "CONSULTATION" in intent else "EXECUTION"
         except:
             return "EXECUTION" 
 
@@ -189,7 +191,6 @@ class BioBlendAgent:
 
         # 分支 B: 生信/Galaxy 专家
         else:
-            # 前置意图分流
             bio_intent = self._classify_bio_intent(user_query)
             history_text = "\n".join([f"User: {h.get('user','')}\nAI: {h.get('ai','')}" for h in chat_history[-3:]])
 
@@ -208,10 +209,8 @@ class BioBlendAgent:
                 {retrieved_tools}
                 
                 **TASK**: List the relevant tools in JSON format.
-                
-                **MANDATORY**: 
-                1. Start with <think> tags to analyze the request.
-                2. Output JSON: ```json [ {{"name": "...", "id": "..."}}, ... ] ```
+                **OUTPUT**: Just the JSON list. No explanations.
+                ```json [ {{"name": "...", "id": "..."}}, ... ] ```
                 """
                 
                 prompt = ChatPromptTemplate.from_template(template)
@@ -223,6 +222,7 @@ class BioBlendAgent:
                 
             else:
                 # === 分流 2: 执行/管理模式 (查账户、跑任务) ===
+                # 【修复】移除了导致报错的 {...} 占位符，改为具体示例
                 template = """
                 You are a Galaxy System Executor.
                 User Request: "{query}"
@@ -235,8 +235,14 @@ class BioBlendAgent:
                 - History: {history}
                 
                 **TASK**: Write Python code using `bioblend` to fulfill the request.
-                - If checking account: `print(gi.users.get_current_user())`
-                - If running tool: `gi.tools.run_tool(...)`
+                
+                **CRITICAL RULES**:
+                1. The variable `gi` is ALREADY CONNECTED. Use it directly.
+                2. **DO NOT** import GalaxyInstance. 
+                3. **DO NOT** use `if __name__ == "__main__":`.
+                4. Always `print()` the result.
+                5. **BIOBLEND SYNTAX**: Use `tool_inputs` argument, NOT `inputs`.
+                   Example: `gi.tools.run_tool(tool_id, tool_inputs={{'param': 'val'}}, history_id=...)`
                 
                 **MANDATORY**: 
                 1. Start with <think> tags to plan the code.
@@ -257,15 +263,18 @@ class BioBlendAgent:
     def _generate_code_only(self, query, file_context_list, tool_info):
         files_desc = "\n".join([f"- ID: {f['id']} | Filename: {f['name']}" for f in file_context_list])
         
+        # 【修复】移除了导致报错的 {...} 占位符
         template = """
         You are a Galaxy BioBlend Expert. User selected tool "{tool_name}" (ID: {tool_id}).
         【Available Files】 {files_desc}
         【User Request】 "{query}"
         
         **CRITICAL RULES**:
-        1. **History ID**: NEVER use placeholders. Use `gi.histories.get_histories()[0]['id']`.
+        1. **History ID**: Use `gi.histories.get_histories()[0]['id']`.
         2. **File IDs**: Use the exact IDs provided.
-        3. **Output**: Start with <think>...</think>, then return Python code inside ```python```.
+        3. **BIOBLEND SYNTAX**: Use `tool_inputs` argument, NOT `inputs`.
+           Example: `gi.tools.run_tool(tool_id, tool_inputs={{'param': 'val'}}, history_id=...)`
+        4. **Output**: Start with <think>...</think>, then return Python code inside ```python```.
         """
         prompt = ChatPromptTemplate.from_template(template)
         chain = prompt | self.brain | StrOutputParser()
@@ -291,7 +300,6 @@ class BioBlendAgent:
         response = response.strip()
         thought_content, clean_response = self._extract_thought(response)
         
-        # 1. Python 代码 (执行/管理)
         if "```python" in clean_response:
             try:
                 code = clean_response.split("```python")[1].split("```")[0].strip()
@@ -307,7 +315,6 @@ class BioBlendAgent:
             except:
                  return {"type": "text", "reply": clean_response, "thought": thought_content, "suggestions": []}
         
-        # 2. JSON 列表 (咨询)
         elif "```json" in clean_response:
             return self._process_json_candidates(clean_response.split("```json")[1].split("```")[0].strip(), thought_content)
         elif "[" in clean_response and "]" in clean_response:
@@ -320,7 +327,6 @@ class BioBlendAgent:
             except:
                 return {"type": "text", "reply": clean_response, "thought": thought_content, "suggestions": []}
         
-        # 3. 普通文本
         else:
             return {"type": "text", "reply": clean_response, "thought": thought_content, "suggestions": []}
 
@@ -333,13 +339,13 @@ class BioBlendAgent:
             for c in candidates:
                 if isinstance(c, str):
                     if "unknown" in c.lower(): continue
-                    cleaned_candidates.append({"name": c, "id": ""})
+                    c = {"name": c, "id": ""}
                 elif isinstance(c, dict):
                     name = c.get('name', 'Unknown Tool')
                     raw_id = c.get('id', '')
                     if "unknown" in name.lower() or "unknown" in raw_id.lower(): continue
                     c['id'] = raw_id
-                    cleaned_candidates.append(c)
+                cleaned_candidates.append(c)
 
             if not cleaned_candidates:
                 return {

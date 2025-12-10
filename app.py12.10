@@ -125,10 +125,8 @@ class BioBlendAgent:
     def _classify_bio_intent(self, query):
         query_lower = query.lower()
         if any(k in query_lower for k in ["账户", "account", "user", "用户", "history", "历史", "run", "运行", "执行", "upload", "上传"]):
-            print(f"   [路由] 规则命中 -> EXECUTION (执行/管理)")
             return "EXECUTION"
         if any(k in query_lower for k in ["列出", "list", "find", "search", "查找", "工具", "tools", "help", "怎么", "how to", "推荐"]):
-            print(f"   [路由] 规则命中 -> CONSULTATION (咨询/检索)")
             return "CONSULTATION"
 
         template = """
@@ -222,7 +220,7 @@ class BioBlendAgent:
                 
             else:
                 # === 分流 2: 执行/管理模式 (查账户、跑任务) ===
-                # 【修复】移除了导致报错的 {...} 占位符，改为具体示例
+                # 【Prompt 升级】强制纠正参数名 inputs -> tool_inputs，且禁止重复传 history_id
                 template = """
                 You are a Galaxy System Executor.
                 User Request: "{query}"
@@ -242,7 +240,8 @@ class BioBlendAgent:
                 3. **DO NOT** use `if __name__ == "__main__":`.
                 4. Always `print()` the result.
                 5. **BIOBLEND SYNTAX**: Use `tool_inputs` argument, NOT `inputs`.
-                   Example: `gi.tools.run_tool(tool_id, tool_inputs={{'param': 'val'}}, history_id=...)`
+                6. **PARAMETER SAFETY**: DO NOT put `history_id` inside `tool_inputs`. It must be a separate keyword argument.
+                   Example: `gi.tools.run_tool(tool_id, tool_inputs={{...}}, history_id=...)`
                 
                 **MANDATORY**: 
                 1. Start with <think> tags to plan the code.
@@ -263,7 +262,7 @@ class BioBlendAgent:
     def _generate_code_only(self, query, file_context_list, tool_info):
         files_desc = "\n".join([f"- ID: {f['id']} | Filename: {f['name']}" for f in file_context_list])
         
-        # 【修复】移除了导致报错的 {...} 占位符
+        # 【Prompt 升级】强制纠正参数名 inputs -> tool_inputs，且禁止重复传 history_id
         template = """
         You are a Galaxy BioBlend Expert. User selected tool "{tool_name}" (ID: {tool_id}).
         【Available Files】 {files_desc}
@@ -273,8 +272,9 @@ class BioBlendAgent:
         1. **History ID**: Use `gi.histories.get_histories()[0]['id']`.
         2. **File IDs**: Use the exact IDs provided.
         3. **BIOBLEND SYNTAX**: Use `tool_inputs` argument, NOT `inputs`.
+        4. **PARAMETER SAFETY**: DO NOT put `history_id` inside `tool_inputs`. It must be a separate keyword argument.
            Example: `gi.tools.run_tool(tool_id, tool_inputs={{'param': 'val'}}, history_id=...)`
-        4. **Output**: Start with <think>...</think>, then return Python code inside ```python```.
+        5. **Output**: Start with <think>...</think>, then return Python code inside ```python```.
         """
         prompt = ChatPromptTemplate.from_template(template)
         chain = prompt | self.brain | StrOutputParser()

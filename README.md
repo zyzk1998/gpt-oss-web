@@ -141,6 +141,11 @@ expand_less
 ```
 python app.py
 ```
+后台运行
+```
+nohup python app.py > app.log 2>&1 &
+```
+
 服务默认运行在 http://0.0.0.0:8082。
 
 🖥️ 交互场景示例

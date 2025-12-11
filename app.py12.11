@@ -1,0 +1,644 @@
+import os
+import io
+import json
+import base64
+import traceback
+import contextlib
+import uvicorn
+import shutil
+import time
+import re
+from fastapi import FastAPI, Request, UploadFile, File
+from fastapi.responses import HTMLResponse, JSONResponse
+from fastapi.templating import Jinja2Templates
+from pydantic import BaseModel
+from typing import List, Optional, Union, Dict, Any
+from dotenv import load_dotenv
+
+# --- LangChain & BioBlend ---
+from bioblend.galaxy import GalaxyInstance
+from langchain_ollama import OllamaEmbeddings, ChatOllama
+from langchain_chroma import Chroma
+from langchain_core.prompts import ChatPromptTemplate
+from langchain_core.output_parsers import StrOutputParser
+from langchain_core.messages import HumanMessage
+
+load_dotenv()
+
+# ================= 配置区域 =================
+PORT = 8082
+EMBED_MODEL = "nomic-embed-text"
+LLM_MODEL = "gpt-oss:latest"
+VISION_MODEL = "llama3.2-vision:11b"
+OLLAMA_URL = "http://localhost:11434"
+VECTOR_DB_PATH = "./data/chroma_db_bioblend"
+GALAXY_URL = os.getenv("GALAXY_URL", "https://usegalaxy.org")
+GALAXY_KEY = os.getenv("GALAXY_API_KEY", "")
+
+# --- 【核心】标准工作流定义 (白名单) ---
+# 只有这里列出的工具才会被规划，防止 AI 乱加 Salmon 之类的工具
+WORKFLOW_TEMPLATES = {
+    "seurat_standard": {
+        "name": "Seurat 单细胞标准分析流程",
+        "steps": [
+            {"name": "1. 创建对象 (Create)", "tool_id": "seurat_create_seurat_object", "desc": "导入 10x 数据生成 RDS"},
+            {"name": "2. 细胞过滤 (Filter)", "tool_id": "seurat_filter_cells", "desc": "根据基因数/线粒体比例过滤"},
+            {"name": "3. 归一化 (Normalize)", "tool_id": "seurat_normalise_data", "desc": "LogNormalize 标准化"},
+            {"name": "4. 高变基因 (FindVarGenes)", "tool_id": "seurat_find_variable_genes", "desc": "寻找高变异特征"},
+            {"name": "5. 数据缩放 (ScaleData)", "tool_id": "seurat_scale_data", "desc": "线性缩放数据"},
+            {"name": "6. PCA 降维 (RunPCA)", "tool_id": "seurat_run_pca", "desc": "主成分分析"},
+            {"name": "7. 构建邻接图 (FindNeighbors)", "tool_id": "seurat_find_neighbours", "desc": "构建 SNN 图"},
+            {"name": "8. 细胞聚类 (FindClusters)", "tool_id": "seurat_find_clusters", "desc": "Louvain 聚类"},
+            {"name": "9. UMAP 可视化 (RunUMAP)", "tool_id": "seurat_run_umap", "desc": "非线性降维可视化"},
+            {"name": "10. 差异分析 (FindMarkers)", "tool_id": "seurat_find_markers", "desc": "寻找 Cluster Marker 基因"}
+        ]
+    }
+}
+
+# --- 复杂工具的硬性需求配置 ---
+TOOL_REQUIREMENTS = {
+    "seurat_create": {
+        "required_keywords": ["matrix", "genes", "barcodes"], 
+        "min_files": 3,
+        "guide_msg": "检测到 Seurat 初始化请求，正在应用标准参数模板...",
+        "code_template": """
+# 1. 获取历史 ID
+histories = gi.histories.get_histories()
+history_id = histories[0]['id']
+
+# 2. 动态查找工具 ID
+tools = gi.tools.get_tools(name='Seurat Create')
+target_tool = next((t for t in tools if 'seurat_create' in t['id']), tools[0])
+tool_id = target_tool['id']
+
+# 3. 构建参数
+tool_inputs = {{
+    'method|method': 'CreateSeuratObject',
+    'method|input_type|input_type': 'mtx',
+    'method|input_type|matrix': {{'src': 'hda', 'id': '{matrix_id}'}},
+    'method|input_type|gene_names': {{'src': 'hda', 'id': '{genes_id}'}},
+    'method|input_type|cell_barcodes': {{'src': 'hda', 'id': '{barcodes_id}'}}
+}}
+
+print(f"正在提交任务，工具ID: {{tool_id}}")
+
+# 4. 执行
+ret = gi.tools.run_tool(tool_id=tool_id, tool_inputs=tool_inputs, history_id=history_id)
+
+# 5. 打印结果
+print("状态: ✅ 任务已成功提交 (Submitted)")
+print(f"任务名称: Seurat Create Object")
+if 'jobs' in ret and len(ret['jobs']) > 0:
+    print(f"Galaxy Job ID: {{ret['jobs'][0]['id']}}")
+else:
+    print(f"Galaxy Job ID: (未返回显式 Job ID)")
+
+if 'outputs' in ret and len(ret['outputs']) > 0:
+    print(f"输出数据集: {{ret['outputs'][0]['id']}}")
+else:
+    print(f"输出数据集: (请在 Galaxy 历史中查看)")
+
+print("提示: 请前往 Galaxy 网页端查看运行进度")
+"""
+    }
+}
+# ===========================================
+
+gi = None
+print(f">>> [系统] 正在连接 Galaxy ({GALAXY_URL})...")
+try:
+    gi = GalaxyInstance(url=GALAXY_URL, key=GALAXY_KEY)
+    user = gi.users.get_current_user()
+    print(f">>> [系统] Galaxy 连接成功! 当前用户: {user.get('username', 'Unknown')}")
+except Exception as e:
+    print(f">>> [严重错误] Galaxy 连接失败: {e}")
+
+class BioBlendAgent:
+    def __init__(self):
+        self.vector_db = self._load_db()
+        self.brain = ChatOllama(model=LLM_MODEL, base_url=OLLAMA_URL, temperature=0.1)
+        self.eye = ChatOllama(model=VISION_MODEL, base_url=OLLAMA_URL, temperature=0)
+        
+        self.system_capabilities = """
+        [Source A: System Kernel (Management)]
+        1. Get Current User Info: gi.users.get_current_user()
+        2. List Histories: gi.histories.get_histories()
+        3. Upload File: gi.tools.upload_file('path', history_id)
+        """
+        
+        self.error_analysis_prompt = ChatPromptTemplate.from_template("""
+        You are a Galaxy Bioinformatics Error Analyst. 
+        【Context】 Error: "{error_msg}"
+        【Task】 Analyze and provide a fix in Chinese.
+        **IMPORTANT**: Explain reasoning inside <think> tags first.
+        """)
+
+    def _load_db(self):
+        if os.path.exists(VECTOR_DB_PATH) and os.listdir(VECTOR_DB_PATH):
+            embeddings = OllamaEmbeddings(model=EMBED_MODEL, base_url=OLLAMA_URL)
+            return Chroma(persist_directory=VECTOR_DB_PATH, embedding_function=embeddings)
+        return None
+
+    def ocr_image(self, image_path):
+        try:
+            with open(image_path, "rb") as image_file:
+                image_data = base64.b64encode(image_file.read()).decode("utf-8")
+            message = HumanMessage(content=[
+                {"type": "text", "text": "Extract text and describe this image in Chinese."},
+                {"type": "image_url", "image_url": {"url": f"data:image/jpeg;base64,{image_data}"}}
+            ])
+            res = self.eye.invoke([message])
+            return res.content
+        except Exception as e:
+            return f"OCR 识别失败: {str(e)}"
+
+    def _analyze_domain(self, query):
+        template = """
+        You are a classifier. Output ONLY one word: "GALAXY_BIO" or "GENERAL".
+        User Input: "{query}"
+        """
+        prompt = ChatPromptTemplate.from_template(template)
+        chain = prompt | self.brain | StrOutputParser()
+        try:
+            return chain.invoke({"query": query[:1000]}).strip()
+        except:
+            return "GALAXY_BIO"
+
+    # 【核心修复】路由逻辑重构：规划 > 执行
+    def _classify_bio_intent(self, query):
+        query_lower = query.lower()
+        
+        # 1. 规划/问答模式 (优先级最高)
+        # 只要包含这些词，哪怕有文件名，也先出方案
+        if any(k in query_lower for k in ["规划", "plan", "全流程", "pipeline", "workflow", "顺序", "order", "步骤", "steps", "怎么", "how to"]):
+            print(f"   [路由] 关键词命中 -> PLANNING (工作流规划)")
+            return "WORKFLOW_PLANNING"
+            
+        # 2. 执行模式
+        if any(k in query_lower for k in ["账户", "account", "user", "用户", "history", "历史", "run", "运行", "执行", "upload", "上传", "做", "完成", "create"]):
+            print(f"   [路由] 关键词命中 -> EXECUTION (执行/管理)")
+            return "EXECUTION"
+            
+        # 3. 咨询模式 (查工具)
+        if any(k in query_lower for k in ["列出", "list", "find", "search", "查找", "工具", "tools", "推荐"]):
+            print(f"   [路由] 关键词命中 -> CONSULTATION (咨询/检索)")
+            return "CONSULTATION"
+            
+        return "WORKFLOW_PLANNING" # 默认兜底
+
+    def _identify_tool_key(self, tool_name):
+        name = tool_name.lower()
+        if "seurat" in name and ("create" in name or "read" in name or "创建" in name or "读取" in name or "初始化" in name):
+            return "seurat_create"
+        return "unknown"
+
+    def _fetch_galaxy_tool_params(self, tool_id):
+        try:
+            histories = gi.histories.get_histories()
+            history_id = histories[0]['id'] if histories else gi.histories.create_history("Temp")['id']
+            tool_info = gi.tools.build(tool_id=tool_id, history_id=history_id)
+            extracted_params = []
+            
+            def recurse_inputs(inputs, context_path=""):
+                for param in inputs:
+                    if param.get('hidden', False): continue
+                    if param['model_class'] == 'DataToolParameter': continue 
+                    if param['model_class'] == 'Repeat':
+                        recurse_inputs(param['inputs'], f"{context_path}[{param['title']}] ")
+                        continue
+                    if param['model_class'] == 'Conditional':
+                        for case in param.get('cases', []):
+                            recurse_inputs(case['inputs'], f"{context_path}[若 {param['name']}={case['value']}] ")
+                        continue
+                    if param['model_class'] == 'Section':
+                        recurse_inputs(param['inputs'], f"{context_path}[{param['title']}] ")
+                        continue
+                    if param['type'] in ['integer', 'float', 'text', 'boolean', 'select']:
+                        p_data = {
+                            "name": param['name'],
+                            "label": f"{context_path}{param.get('label', param['name'])}",
+                            "type": param['type'],
+                            "value": param.get('value', ''),
+                            "help": param.get('help', '')
+                        }
+                        if param['type'] == 'select':
+                            p_data['options'] = [{"label": o[0], "value": o[1]} for o in param.get('options', []) if len(o)>=2]
+                        extracted_params.append(p_data)
+
+            recurse_inputs(tool_info['inputs'])
+            return extracted_params
+        except Exception as e:
+            print(f"Error fetching params: {e}")
+            return None
+
+    def smart_process(self, user_query, file_context_list, chat_history=[], selected_tool=None, tool_params=None, workflow_data=None):
+        if not self.vector_db:
+            return {"type": "text", "reply": "❌ 错误：知识库未加载。", "suggestions": []}
+
+        # 0. 强制执行通道
+        if selected_tool:
+            if not tool_params:
+                return self._handle_tool_selection(selected_tool, file_context_list)
+            else:
+                return self._generate_code_with_params(selected_tool, tool_params, file_context_list)
+        
+        # 0.1 工作流执行通道
+        if workflow_data:
+            return self._execute_workflow_chain(workflow_data, file_context_list)
+
+        # 1. 领域感知
+        domain = self._analyze_domain(user_query)
+
+        if "GENERAL" in domain:
+            template = """
+            You are a helpful AI Assistant. User Input: {query}. History: {history}. 
+            Answer directly in Chinese.
+            **IMPORTANT**: First, think step-by-step inside <think> tags.
+            """
+            history_text = "\n".join([f"User: {h.get('user','')}\nAI: {h.get('ai','')}" for h in chat_history[-3:]])
+            prompt = ChatPromptTemplate.from_template(template)
+            chain = prompt | self.brain | StrOutputParser()
+            response = chain.invoke({"query": user_query, "history": history_text})
+            return self._parse_llm_response(response, context="chat", user_query=user_query)
+
+        else:
+            bio_intent = self._classify_bio_intent(user_query)
+            history_text = "\n".join([f"User: {h.get('user','')}\nAI: {h.get('ai','')}" for h in chat_history[-3:]])
+
+            if bio_intent == "WORKFLOW_PLANNING":
+                # === 工作流规划模式 ===
+                if "seurat" in user_query.lower() or "单细胞" in user_query or "转录组" in user_query:
+                    template_key = "seurat_standard"
+                    wf = WORKFLOW_TEMPLATES[template_key]
+                    
+                    steps_with_params = []
+                    print(f"   [系统] 正在为工作流抓取参数...")
+                    for step in wf['steps']:
+                        # 尝试获取参数，如果失败则只返回基本信息
+                        res = self._fetch_galaxy_tool_params(step['tool_id'])
+                        params = res if res else []
+                        
+                        steps_with_params.append({
+                            "name": step['name'],
+                            "tool_id": step['tool_id'], 
+                            "desc": step['desc'],
+                            "params": params
+                        })
+                    
+                    return {
+                        "type": "workflow_config",
+                        "workflow_name": wf['name'],
+                        "steps": steps_with_params,
+                        "reply": f"已为您规划 **{wf['name']}**，包含 {len(steps_with_params)} 个步骤。请确认每一步的参数：",
+                        "thought": "<think>识别到用户需要单细胞全流程。已加载 Seurat 标准模板，并实时抓取了所有工具的最新参数配置。</think>"
+                    }
+
+            if bio_intent == "CONSULTATION":
+                retriever = self.vector_db.as_retriever(search_kwargs={"k": 25})
+                docs = retriever.invoke(user_query)
+                retrieved_tools = "\n".join([f"- {d.page_content}" for i, d in enumerate(docs)])
+
+                template = """
+                You are a Galaxy Tool Consultant. User Request: "{query}"
+                【Available Tools (RAG)】 {retrieved_tools}
+                **TASK**: List tools in JSON format.
+                **MANDATORY**: Start with <think> tags. Output JSON: ```json [ {{"name": "...", "id": "..."}}, ... ] ```
+                """
+                prompt = ChatPromptTemplate.from_template(template)
+                chain = prompt | self.brain | StrOutputParser()
+                response = chain.invoke({"query": user_query, "retrieved_tools": retrieved_tools})
+                
+            else:
+                # EXECUTION
+                tool_key = self._identify_tool_key(user_query)
+                if tool_key in TOOL_REQUIREMENTS and 'code_template' in TOOL_REQUIREMENTS[tool_key]:
+                    template_data = TOOL_REQUIREMENTS[tool_key]
+                    
+                    matrix_id = next((f['id'] for f in file_context_list if 'matrix' in f['name']), "MISSING")
+                    genes_id = next((f['id'] for f in file_context_list if 'genes' in f['name'] or 'features' in f['name']), "MISSING")
+                    barcodes_id = next((f['id'] for f in file_context_list if 'barcodes' in f['name']), "MISSING")
+                    
+                    if "MISSING" in [matrix_id, genes_id, barcodes_id]:
+                        return {"type": "text", "reply": template_data['guide_msg'] + f"\n当前文件状态: Matrix={matrix_id}, Genes={genes_id}, Barcodes={barcodes_id}", "thought": "<think>检测到文件缺失，中断执行。</think>", "suggestions": []}
+                    
+                    final_code = template_data['code_template'].format(
+                        matrix_id=matrix_id,
+                        genes_id=genes_id,
+                        barcodes_id=barcodes_id
+                    )
+                    
+                    response = f"<think>检测到用户意图为运行 Seurat。匹配到标准模板。已自动提取文件 ID 并生成代码。</think>\n```python\n{final_code}\n```"
+                
+                else:
+                    retriever = self.vector_db.as_retriever(search_kwargs={"k": 3})
+                    docs = retriever.invoke(user_query)
+                    retrieved_knowledge = "\n".join([f"- {d.page_content}" for i, d in enumerate(docs)])
+
+                    template = """
+                    You are a Galaxy System Executor. User Request: "{query}"
+                    【System Capabilities】 {system_caps}
+                    【Knowledge Base】 {retrieved_knowledge}
+                    【Context】 Uploaded Files: {file_context_list}
+                    **TASK**: Write Python code using `bioblend`.
+                    **CRITICAL**: Use `gi` directly. NO `if __name__`. Print results.
+                    **MANDATORY**: Start with <think> tags. Output Python Code: ```python ... ```
+                    """
+                    prompt = ChatPromptTemplate.from_template(template)
+                    chain = prompt | self.brain | StrOutputParser()
+                    response = chain.invoke({
+                        "query": user_query,
+                        "system_caps": self.system_capabilities,
+                        "retrieved_knowledge": retrieved_knowledge,
+                        "file_context_list": str(file_context_list),
+                        "history": history_text
+                    })
+
+            return self._parse_llm_response(response, context="chat", user_query=user_query)
+
+    def _handle_tool_selection(self, tool_info, file_context_list):
+        tool_name = tool_info['name']
+        tool_id = tool_info.get('id', '')
+        
+        if not tool_id or "unknown" in tool_id.lower():
+            try:
+                tools = gi.tools.get_tools(name=tool_name)
+                if tools: tool_id = tools[0]['id']
+            except: pass
+            
+        print(f"   [系统] 正在抓取工具参数: {tool_name} ({tool_id})")
+        params = self._fetch_galaxy_tool_params(tool_id)
+        
+        if params:
+            params_json = json.dumps(params, indent=2, ensure_ascii=False)
+            return {
+                "type": "tool_config",
+                "tool_name": tool_name,
+                "tool_id": tool_id,
+                "params": params,
+                "reply": f"已获取 **{tool_name}** 的配置参数，请确认：",
+                "thought": f"<think>成功调用 Galaxy API 获取了工具参数结构。共发现 {len(params)} 个可配置参数。</think>"
+            }
+        else:
+            return self._generate_code_only(f"Run {tool_name}", file_context_list, tool_info)
+
+    def _execute_workflow_chain(self, workflow_data, file_context_list):
+        steps = workflow_data['steps']
+        execution_log = []
+        last_output_id = None
+        
+        histories = gi.histories.get_histories()
+        history_id = histories[0]['id']
+        
+        matrix_id = next((f['id'] for f in file_context_list if 'matrix' in f['name']), None)
+        genes_id = next((f['id'] for f in file_context_list if 'genes' in f['name'] or 'features' in f['name']), None)
+        barcodes_id = next((f['id'] for f in file_context_list if 'barcodes' in f['name']), None)
+
+        print(f"   [工作流] 开始执行 {len(steps)} 个步骤...")
+        
+        for i, step in enumerate(steps):
+            tool_id = step['tool_id']
+            user_params = step['params']
+            
+            print(f"   [Step {i+1}] Running {step['name']}...")
+            
+            try:
+                tool_inputs = {}
+                # 填入用户参数
+                if isinstance(user_params, list): # 如果是列表，说明是参数定义，不是值
+                     # 这里简化：如果是列表，说明用户没改，用默认值（这里需要前端传回具体值，暂略）
+                     pass
+                elif isinstance(user_params, dict):
+                    for k, v in user_params.items():
+                        tool_inputs[k] = v
+                
+                if i == 0: 
+                    if "create" in tool_id or "read10x" in tool_id:
+                        if not (matrix_id and genes_id and barcodes_id):
+                             return {"type": "text", "reply": f"❌ 步骤 1 失败：缺少必要的 10x 文件 (Matrix/Genes/Barcodes)。", "thought": None}
+                        
+                        tool_inputs['method|method'] = 'CreateSeuratObject'
+                        tool_inputs['method|input_type|input_type'] = 'mtx'
+                        tool_inputs['method|input_type|matrix'] = {'src': 'hda', 'id': matrix_id}
+                        tool_inputs['method|input_type|gene_names'] = {'src': 'hda', 'id': genes_id}
+                        tool_inputs['method|input_type|cell_barcodes'] = {'src': 'hda', 'id': barcodes_id}
+                else:
+                    # 自动接力
+                    tool_inputs['seurat_rds'] = {'src': 'hda', 'id': last_output_id}
+                
+                ret = gi.tools.run_tool(tool_id=tool_id, tool_inputs=tool_inputs, history_id=history_id)
+                
+                if ret['outputs']:
+                    last_output_id = ret['outputs'][0]['id']
+                    execution_log.append(f"✅ Step {i+1} {step['name']}: Job {ret['jobs'][0]['id']} Submitted.")
+                else:
+                    execution_log.append(f"⚠️ Step {i+1} {step['name']}: No output produced.")
+                    
+            except Exception as e:
+                execution_log.append(f"❌ Step {i+1} {step['name']} Failed: {str(e)}")
+                break 
+        
+        final_report = "\n".join(execution_log)
+        return {
+            "type": "text",
+            "reply": f"**工作流执行报告**\n\n{final_report}",
+            "thought": "<think>工作流引擎已按顺序提交任务。数据流已自动接力。</think>",
+            "suggestions": ["查看 Galaxy 历史", "下载结果"]
+        }
+
+    def _generate_code_with_params(self, tool_info, user_params, file_context_list):
+        files_desc = "\n".join([f"- ID: {f['id']} | Filename: {f['name']}" for f in file_context_list])
+        params_json = json.dumps(user_params, indent=2, ensure_ascii=False)
+        
+        template = """
+        You are a Galaxy BioBlend Expert. 
+        Target Tool: "{tool_name}" (ID: {tool_id})
+        【User Configured Parameters】 {params_json}
+        【Available Files】 {files_desc}
+        **TASK**: Write Python code to run this tool.
+        **CRITICAL**: 
+        1. Use `gi.tools.run_tool`. 
+        2. **INPUT CHAINING**: Find the latest dataset in history to use as input (if required).
+        3. Map user parameters to `tool_inputs`.
+        4. Start with <think> tags.
+        """
+        prompt = ChatPromptTemplate.from_template(template)
+        chain = prompt | self.brain | StrOutputParser()
+        response = chain.invoke({
+            "tool_name": tool_info['name'],
+            "tool_id": tool_info['id'],
+            "params_json": params_json,
+            "files_desc": files_desc
+        })
+        return self._parse_llm_response(response, context="execution")
+
+    def _generate_code_only(self, query, file_context_list, tool_info):
+        files_desc = "\n".join([f"- ID: {f['id']} | Filename: {f['name']}" for f in file_context_list])
+        template = """
+        You are a Galaxy BioBlend Expert. User selected tool "{tool_name}" (ID: {tool_id}).
+        【Available Files】 {files_desc}
+        **CRITICAL**: Use `gi`. No `if __name__`.
+        **MANDATORY**: Start with <think> tags. Output Python Code.
+        """
+        prompt = ChatPromptTemplate.from_template(template)
+        chain = prompt | self.brain | StrOutputParser()
+        response = chain.invoke({
+            "tool_name": tool_info['name'],
+            "tool_id": tool_info['id'],
+            "query": query,
+            "files_desc": files_desc
+        })
+        return self._parse_llm_response(response, context="execution", user_query=query)
+
+    def _extract_thought(self, text):
+        pattern = r"<think>(.*?)</think>"
+        match = re.search(pattern, text, re.DOTALL)
+        if match:
+            thought = match.group(1).strip()
+            clean_text = re.sub(pattern, "", text, flags=re.DOTALL).strip()
+            return thought, clean_text
+        else:
+            return None, text
+
+    def _parse_llm_response(self, response, context="chat", user_query=""):
+        response = response.strip()
+        thought_content, clean_response = self._extract_thought(response)
+        
+        if "```python" in clean_response:
+            try:
+                code = clean_response.split("```python")[1].split("```")[0].strip()
+                success, exec_out, error_msg = self._execute_code_sandbox(code)
+                
+                if success:
+                    final_reply = f"### 🤖 策略代码\n```python\n{code}\n```\n### ✅ 执行结果\n```text\n{exec_out}\n```"
+                    return {"type": "text", "reply": final_reply, "thought": thought_content, "suggestions": ["保存结果", "可视化"]}
+                else:
+                    print(f"   [错误] 代码执行失败: {error_msg}")
+                    diagnosis = self._analyze_error_and_guide(user_query, code, error_msg)
+                    return {"type": "text", "reply": diagnosis, "thought": thought_content, "suggestions": ["重试"]}
+            except:
+                 return {"type": "text", "reply": clean_response, "thought": thought_content, "suggestions": []}
+        
+        elif "```json" in clean_response:
+            return self._process_json_candidates(clean_response.split("```json")[1].split("```")[0].strip(), thought_content)
+        elif "[" in clean_response and "]" in clean_response:
+            try:
+                start = clean_response.find("[")
+                end = clean_response.rfind("]") + 1
+                potential_json = clean_response[start:end]
+                json.loads(potential_json) 
+                return self._process_json_candidates(potential_json, thought_content)
+            except:
+                return {"type": "text", "reply": clean_response, "thought": thought_content, "suggestions": []}
+        
+        else:
+            return {"type": "text", "reply": clean_response, "thought": thought_content, "suggestions": []}
+
+    def _process_json_candidates(self, json_str, thought_content):
+        try:
+            candidates = json.loads(json_str)
+            if not isinstance(candidates, list): candidates = [candidates]
+            cleaned_candidates = []
+            for c in candidates:
+                if isinstance(c, str):
+                    if "unknown" in c.lower(): continue
+                    c = {"name": c, "id": ""}
+                elif isinstance(c, dict):
+                    name = c.get('name', 'Unknown Tool')
+                    raw_id = c.get('id', '')
+                    if "unknown" in name.lower() or "unknown" in raw_id.lower(): continue
+                    c['id'] = raw_id
+                cleaned_candidates.append(c)
+            
+            if not cleaned_candidates:
+                 return {"type": "text", "reply": "未找到相关工具。", "thought": thought_content, "suggestions": []}
+
+            return {"type": "choice", "reply": f"为您找到了 {len(cleaned_candidates)} 个相关工具：", "candidates": cleaned_candidates, "thought": thought_content, "suggestions": []}
+        except:
+            return {"type": "text", "reply": json_str, "thought": thought_content, "suggestions": []}
+
+    def _analyze_error_and_guide(self, query, code, error_msg):
+        chain = self.error_analysis_prompt | self.brain | StrOutputParser()
+        try:
+            short_error = error_msg[-2000:] if len(error_msg) > 2000 else error_msg
+            diagnosis = chain.invoke({"query": query, "code_snippet": code[:500], "error_msg": short_error})
+            thought, clean_diag = self._extract_thought(diagnosis)
+            return clean_diag 
+        except Exception as e:
+            return f"❌ 执行出错。\n原始错误: {str(e)}"
+
+    def _execute_code_sandbox(self, code):
+        if not gi: return False, "", "Galaxy 未连接"
+        output_buffer = io.StringIO()
+        try:
+            sandbox = {"gi": gi, "json": json, "print": print}
+            with contextlib.redirect_stdout(output_buffer):
+                exec(code, sandbox)
+            return True, output_buffer.getvalue() or "(执行成功，无屏幕输出)", ""
+        except Exception:
+            err = traceback.format_exc()
+            return False, "", err
+
+app = FastAPI()
+templates = Jinja2Templates(directory="templates")
+agent = BioBlendAgent()
+
+class ChatRequest(BaseModel):
+    message: str
+    history: List[Dict[str, str]] = [] 
+    selected_tool: Optional[Dict[str, Any]] = None
+    tool_params: Optional[Dict[str, Any]] = None
+    workflow_data: Optional[Dict[str, Any]] = None # 新增：工作流数据
+    uploaded_files: List[Dict[str, str]] = [] 
+
+@app.get("/", response_class=HTMLResponse)
+async def read_root(request: Request):
+    return templates.TemplateResponse("index.html", {"request": request})
+
+@app.post("/api/upload")
+async def upload_handler(file: UploadFile = File(...)):
+    try:
+        temp_path = f"temp_{file.filename}"
+        with open(temp_path, "wb") as buffer:
+            shutil.copyfileobj(file.file, buffer)
+        result = {"status": "success", "file_name": file.filename}
+        if file.filename.lower().endswith(('.png', '.jpg', '.jpeg')):
+            ocr_text = agent.ocr_image(temp_path)
+            result["type"] = "image"
+            result["ocr_text"] = ocr_text
+            result["suggestions"] = []
+            os.remove(temp_path) 
+        else:
+            if gi:
+                histories = gi.histories.get_histories()
+                hid = histories[0]['id'] if histories else gi.histories.create_history("GPT-OSS Analysis")['id']
+                max_retries = 3
+                for attempt in range(max_retries):
+                    try:
+                        print(f"Uploading {file.filename} (Attempt {attempt+1}/{max_retries})...")
+                        ret = gi.tools.upload_file(temp_path, hid)
+                        result["type"] = "data"
+                        result["file_id"] = ret['outputs'][0]['id']
+                        result["suggestions"] = []
+                        break 
+                    except Exception as upload_err:
+                        print(f"Upload failed: {upload_err}")
+                        if attempt < max_retries - 1: time.sleep(2) 
+                        else: raise upload_err
+                os.remove(temp_path)
+            else:
+                return {"status": "error", "message": "Galaxy 未连接"}
+        return result
+    except Exception as e:
+        return {"status": "error", "message": f"上传失败: {str(e)}"}
+
+@app.post("/api/chat")
+async def chat_handler(req: ChatRequest):
+    try:
+        response = agent.smart_process(req.message, req.uploaded_files, req.history, req.selected_tool, req.tool_params, req.workflow_data)
+        return response
+    except Exception as e:
+        traceback.print_exc()
+        return JSONResponse(status_code=500, content={"type": "text", "reply": f"❌ 系统内部错误: {str(e)}", "thought": None, "suggestions": ["重试"]})
+
+if __name__ == "__main__":
+    uvicorn.run(app, host="0.0.0.0", port=PORT)

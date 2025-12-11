@@ -145,7 +145,14 @@ python app.py
 ```
 nohup python app.py > app.log 2>&1 &
 ```
-
+查找进程
+```
+ps -ef | grep app.py
+```
+停止进程
+```
+pkill -f "python app.py"
+```
 服务默认运行在 http://0.0.0.0:8082。
 
 🖥️ 交互场景示例

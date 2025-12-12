@@ -1,0 +1,871 @@
+import os
+import io
+import json
+import base64
+import traceback
+import contextlib
+import uvicorn
+import shutil
+import time
+import re
+import ast
+import threading
+import uuid
+from datetime import datetime
+from fastapi import FastAPI, Request, UploadFile, File, BackgroundTasks
+from fastapi.responses import HTMLResponse, JSONResponse
+from fastapi.templating import Jinja2Templates
+from pydantic import BaseModel
+from typing import List, Optional, Union, Dict, Any
+from dotenv import load_dotenv
+
+# --- LangChain & BioBlend ---
+from bioblend.galaxy import GalaxyInstance
+from langchain_ollama import OllamaEmbeddings, ChatOllama
+from langchain_chroma import Chroma
+from langchain_core.prompts import ChatPromptTemplate
+from langchain_core.output_parsers import StrOutputParser
+from langchain_core.messages import HumanMessage
+
+load_dotenv()
+
+# ================= 配置区域 =================
+PORT = 8082
+EMBED_MODEL = "nomic-embed-text"
+LLM_MODEL = "qwen3-vl:32b" 
+OLLAMA_URL = "http://localhost:11434"
+VECTOR_DB_PATH = "./data/chroma_db_bioblend"
+GALAXY_URL = os.getenv("GALAXY_URL", "https://usegalaxy.org")
+GALAXY_KEY = os.getenv("GALAXY_API_KEY", "")
+
+# --- 工作流定义 ---
+WORKFLOW_TEMPLATES = {
+    "seurat_standard": {
+        "name": "Seurat 单细胞标准分析流程",
+        "steps": [
+            {"name": "1. 创建对象 (Create)", "tool_keyword": "Seurat Create", "desc": "导入 10x 数据生成 RDS", "params": {"min_cells": "3", "min_features": "200", "project_name": "Project1"}},
+            # 【优化】默认参数改为无特殊符号，防止 Galaxy 校验失败
+            {"name": "2. 细胞过滤 (Filter)", "tool_keyword": "Seurat FilterCells", "desc": "根据基因数/线粒体比例过滤", "params": {"subset_name": "nFeatureRNA", "low_threshold": "200", "high_threshold": "2500"}},
+            {"name": "3. 归一化 (Normalize)", "tool_keyword": "Seurat NormaliseData", "desc": "LogNormalize 标准化", "params": {"normalization_method": "LogNormalize", "scale_factor": "10000"}},
+            {"name": "4. 高变基因 (FindVarGenes)", "tool_keyword": "Seurat FindVariableGenes", "desc": "寻找高变异特征", "params": {"selection_method": "vst", "nfeatures": "2000"}},
+            {"name": "5. 数据缩放 (ScaleData)", "tool_keyword": "Seurat ScaleData", "desc": "线性缩放数据", "params": {"do_center": "true", "do_scale": "true"}},
+            {"name": "6. PCA 降维 (RunPCA)", "tool_keyword": "Seurat RunPCA", "desc": "主成分分析", "params": {"npcs": "50"}},
+            {"name": "7. 构建邻接图 (FindNeighbors)", "tool_keyword": "Seurat FindNeighbours", "desc": "构建 SNN 图", "params": {"dims": "1:10", "k_param": "20"}},
+            {"name": "8. 细胞聚类 (FindClusters)", "tool_keyword": "Seurat FindClusters", "desc": "Louvain 聚类", "params": {"resolution": "0.5", "algorithm": "1"}},
+            {"name": "9. UMAP 可视化 (RunUMAP)", "tool_keyword": "Seurat Run UMAP", "desc": "非线性降维可视化", "params": {"dims": "1:10"}},
+            {"name": "10. 差异分析 (FindMarkers)", "tool_keyword": "Seurat FindMarkers", "desc": "寻找 Cluster Marker 基因", "params": {"min_pct": "0.25", "logfc_threshold": "0.25"}}
+        ]
+    }
+}
+
+TOOL_REQUIREMENTS = {
+    "seurat_create": {
+        "required_keywords": ["matrix", "genes", "barcodes"], 
+        "min_files": 3,
+        "guide_msg": "检测到 Seurat 初始化请求，正在应用标准参数模板..."
+    }
+}
+
+gi = None
+print(f">>> [系统] 正在连接 Galaxy ({GALAXY_URL})...")
+try:
+    gi = GalaxyInstance(url=GALAXY_URL, key=GALAXY_KEY)
+    user = gi.users.get_current_user()
+    print(f">>> [系统] Galaxy 连接成功! 当前用户: {user.get('username', 'Unknown')}")
+except Exception as e:
+    print(f">>> [严重错误] Galaxy 连接失败: {e}")
+
+# --- 任务管理器 ---
+class WorkflowManager:
+    def __init__(self):
+        self.tasks = {} 
+
+    def create_task(self, workflow_name, total_steps):
+        run_id = str(uuid.uuid4())
+        self.tasks[run_id] = {
+            "status": "running",
+            "workflow_name": workflow_name,
+            "current_step_index": 0,
+            "total_steps": total_steps,
+            "steps_status": [{"name": "", "status": "pending"} for _ in range(total_steps)],
+            "logs": [],
+            "error": None,
+            "completed": False
+        }
+        return run_id
+
+    def update_step(self, run_id, step_index, step_name, status, log=None):
+        if run_id in self.tasks:
+            self.tasks[run_id]["steps_status"][step_index]["name"] = step_name
+            self.tasks[run_id]["steps_status"][step_index]["status"] = status
+            if status == "running":
+                self.tasks[run_id]["current_step_index"] = step_index
+            if log:
+                self.tasks[run_id]["logs"].append(log)
+                print(f"[Task {run_id}] {log}")
+
+    def fail_task(self, run_id, error_msg):
+        if run_id in self.tasks:
+            self.tasks[run_id]["status"] = "failed"
+            self.tasks[run_id]["error"] = error_msg
+            self.tasks[run_id]["completed"] = True
+            print(f"[Task {run_id}] FAILED: {error_msg}")
+
+    def complete_task(self, run_id):
+        if run_id in self.tasks:
+            self.tasks[run_id]["status"] = "success"
+            self.tasks[run_id]["completed"] = True
+            print(f"[Task {run_id}] COMPLETED")
+
+wf_manager = WorkflowManager()
+
+class BioBlendAgent:
+    def __init__(self):
+        self.vector_db = self._load_db()
+        self.brain = ChatOllama(model=LLM_MODEL, base_url=OLLAMA_URL, temperature=0.1)
+        self.system_capabilities = """
+        [Source A: System Kernel (Management)]
+        1. Get Current User Info: gi.users.get_current_user()
+        2. List Histories: gi.histories.get_histories()
+        3. Upload File: gi.tools.upload_file('path', history_id)
+        """
+        self.error_analysis_prompt = ChatPromptTemplate.from_template("""
+        You are a Galaxy Bioinformatics Error Analyst. 
+        【Context】 Error: "{error_msg}"
+        【Task】 Analyze and provide a fix in Chinese.
+        **IMPORTANT**: Explain reasoning inside [THOUGHT] tags first.
+        """)
+
+    def _load_db(self):
+        if os.path.exists(VECTOR_DB_PATH) and os.listdir(VECTOR_DB_PATH):
+            try:
+                embeddings = OllamaEmbeddings(model=EMBED_MODEL, base_url=OLLAMA_URL)
+                return Chroma(persist_directory=VECTOR_DB_PATH, embedding_function=embeddings)
+            except Exception as e:
+                print(f"Loading Vector DB failed: {e}")
+                return None
+        return None
+
+    def ocr_image(self, image_path):
+        try:
+            with open(image_path, "rb") as image_file:
+                image_data = base64.b64encode(image_file.read()).decode("utf-8")
+            message = HumanMessage(content=[
+                {"type": "text", "text": "Extract text and describe this image in Chinese. If it's a plot, analyze the biological meaning."},
+                {"type": "image_url", "image_url": {"url": f"data:image/jpeg;base64,{image_data}"}}
+            ])
+            res = self.brain.invoke([message])
+            return res.content
+        except Exception as e:
+            return f"OCR 识别失败: {str(e)}"
+
+    def _analyze_domain(self, query):
+        template = """
+        You are a classifier. Output ONLY one word: "GALAXY_BIO" or "GENERAL".
+        User Input: "{query}"
+        """
+        prompt = ChatPromptTemplate.from_template(template)
+        chain = prompt | self.brain | StrOutputParser()
+        try:
+            return chain.invoke({"query": query[:1000]}).strip()
+        except:
+            return "GALAXY_BIO"
+
+    def _classify_bio_intent(self, query, chat_history=[]):
+        query_lower = query.lower()
+        
+        context_keywords = ""
+        if chat_history:
+            last_entry = chat_history[-1]
+            if 'ai' in last_entry:
+                last_ai_reply = last_entry['ai'].lower()
+                if "历史数据" in last_ai_reply or "history" in last_ai_reply:
+                    context_keywords += " history_reuse"
+                if "seurat" in last_ai_reply:
+                    context_keywords += " seurat"
+                if "工作流" in last_ai_reply or "workflow" in last_ai_reply:
+                    context_keywords += " workflow"
+        
+        augmented_query = query_lower + context_keywords
+        print(f"   [路由分析] 原句: '{query}' | 上下文增强: '{augmented_query}'")
+
+        if any(k in augmented_query for k in ["工具", "tools"]) and any(k in augmented_query for k in ["列出", "list", "find", "search", "查找", "推荐", "有哪些"]):
+            return "CONSULTATION"
+
+        if any(k in augmented_query for k in ["规划", "plan", "全流程", "pipeline", "workflow", "顺序", "order", "步骤", "steps", "怎么", "how to", "看看", "列出"]):
+            return "WORKFLOW_PLANNING"
+            
+        if any(k in augmented_query for k in ["账户", "account", "user", "用户", "history", "历史", "run", "运行", "执行", "upload", "上传", "做", "完成", "create", "是", "yes", "确认", "好的"]):
+            if "history_reuse" in context_keywords and any(k in query_lower for k in ["是", "yes", "好", "ok", "确认"]):
+                return "WORKFLOW_PLANNING"
+            return "EXECUTION"
+            
+        return "WORKFLOW_PLANNING" 
+
+    def _identify_tool_key(self, tool_name):
+        name = tool_name.lower()
+        if "seurat" in name and ("create" in name or "read" in name or "创建" in name or "读取" in name or "初始化" in name):
+            return "seurat_create"
+        return "unknown"
+
+    def _find_tool_id_by_keyword(self, keyword):
+        try:
+            tools = gi.tools.get_tools(name=keyword)
+            if tools:
+                print(f"   [Tool Search] Exact match '{keyword}': {tools[0]['id']}")
+                return tools[0]['id']
+            
+            all_tools = gi.tools.get_tools()
+            for t in all_tools:
+                if keyword.lower() in t['name'].lower():
+                    print(f"   [Tool Search] Fuzzy match '{keyword}' -> {t['name']}: {t['id']}")
+                    return t['id']
+                    
+            print(f"   [Tool Search] Warning: No tool found for '{keyword}'")
+            return None
+        except Exception as e:
+            print(f"   [Tool Search] Error searching '{keyword}': {e}")
+            return None
+
+    def _fetch_galaxy_tool_params(self, tool_keyword):
+        tool_id = self._find_tool_id_by_keyword(tool_keyword)
+        if not tool_id: return []
+        
+        try:
+            histories = gi.histories.get_histories()
+            history_id = histories[0]['id'] if histories else gi.histories.create_history("Temp")['id']
+            tool_info = gi.tools.build(tool_id=tool_id, history_id=history_id)
+            extracted_params = []
+            
+            def recurse_inputs(inputs, context_path=""):
+                for param in inputs:
+                    if param.get('hidden', False): continue
+                    if param['model_class'] == 'DataToolParameter': continue 
+                    if param['model_class'] == 'Repeat':
+                        recurse_inputs(param['inputs'], f"{context_path}[{param['title']}] ")
+                        continue
+                    if param['model_class'] == 'Conditional':
+                        for case in param.get('cases', []):
+                            recurse_inputs(case['inputs'], f"{context_path}[若 {param['name']}={case['value']}] ")
+                        continue
+                    if param['model_class'] == 'Section':
+                        recurse_inputs(param['inputs'], f"{context_path}[{param['title']}] ")
+                        continue
+                    if param['type'] in ['integer', 'float', 'text', 'boolean', 'select']:
+                        p_data = {
+                            "name": param['name'],
+                            "label": f"{context_path}{param.get('label', param['name'])}",
+                            "type": param['type'],
+                            "value": param.get('value', ''),
+                            "help": param.get('help', '')
+                        }
+                        if param['type'] == 'select':
+                            p_data['options'] = [{"label": o[0], "value": o[1]} for o in param.get('options', []) if len(o)>=2]
+                        extracted_params.append(p_data)
+
+            recurse_inputs(tool_info['inputs'])
+            return extracted_params
+        except Exception as e:
+            print(f"Error fetching params: {e}")
+            return None
+
+    def _get_history_datasets(self):
+        try:
+            histories = gi.histories.get_histories()
+            if not histories: return []
+            history_id = histories[0]['id']
+            datasets = gi.histories.show_history(history_id, contents=True, deleted=False, visible=True)
+            valid_datasets = []
+            for d in datasets:
+                if d['history_content_type'] == 'dataset' and d['state'] == 'ok':
+                    valid_datasets.append({
+                        "id": d['id'],
+                        "hid": d['hid'], 
+                        "name": d['name'],
+                        "ext": d['extension'],
+                        "size": d.get('file_size', 'Unknown')
+                    })
+            valid_datasets.sort(key=lambda x: x['hid'], reverse=True)
+            return valid_datasets[:100] 
+        except Exception as e:
+            print(f"Fetch history failed: {e}")
+            return []
+
+    def _parse_files_from_query(self, query, history_files):
+        selected_files = []
+        query_lower = query.lower()
+        
+        numbers = re.findall(r'\b\d+\b', query)
+        if numbers:
+            target_hids = [int(n) for n in numbers]
+            for f in history_files:
+                if f['hid'] in target_hids:
+                    selected_files.append(f)
+        
+        if not selected_files:
+            keywords = ["matrix", "genes", "features", "barcodes", "mtx", "tsv"]
+            for f in history_files:
+                fname = f['name'].lower()
+                if any(kw in fname for kw in keywords) and any(kw in query_lower for kw in keywords):
+                     if "matrix" in query_lower and ("matrix" in fname or "mtx" in fname):
+                         if f not in selected_files: selected_files.append(f)
+                     if ("genes" in query_lower or "features" in query_lower) and ("genes" in fname or "features" in fname):
+                         if f not in selected_files: selected_files.append(f)
+                     if "barcodes" in query_lower and "barcodes" in fname:
+                         if f not in selected_files: selected_files.append(f)
+
+        return selected_files
+
+    def smart_process(self, user_query, file_context_list, chat_history=[], selected_tool=None, tool_params=None, workflow_data=None, use_history_files=False):
+        if selected_tool:
+            if not tool_params:
+                return self._handle_tool_selection(selected_tool, file_context_list)
+            else:
+                return self._generate_code_with_params(selected_tool, tool_params, file_context_list)
+        
+        if workflow_data:
+            run_id = wf_manager.create_task("Seurat Workflow", len(workflow_data['steps']))
+            threading.Thread(target=self._execute_workflow_background, args=(run_id, workflow_data, file_context_list)).start()
+            return {
+                "type": "workflow_started",
+                "run_id": run_id,
+                "reply": "🚀 工作流已提交到后台执行！",
+                "thought": "[THOUGHT]任务已移交后台任务管理器。[/THOUGHT]"
+            }
+
+        is_checking_data = any(k in user_query for k in ["看看", "查看", "列出", "选", "哪些", "什么"]) and any(k in user_query for k in ["数据", "文件", "data", "file"])
+        if is_checking_data and not file_context_list:
+            history_files = self._get_history_datasets()
+            if history_files:
+                return {
+                    "type": "data_selector",
+                    "datasets": history_files,
+                    "reply": f"为您找到 Galaxy 历史记录中的最近 {len(history_files)} 个数据文件。请勾选您需要使用的文件：",
+                    "thought": "[THOUGHT]用户意图为查看或选择数据，直接调用后端接口获取历史文件列表并展示 UI。[/THOUGHT]"
+                }
+            else:
+                return {"type": "text", "reply": "当前 Galaxy 历史记录为空，请先上传文件。", "thought": None}
+
+        if any(x in user_query for x in ["介绍", "你是谁", "help", "帮助", "你好", "hello"]):
+            domain = "GENERAL"
+        else:
+            domain = self._analyze_domain(user_query)
+
+        if "GENERAL" in domain:
+            template = """
+            You are a helpful AI Assistant. User Input: {query}. History: {history}. 
+            Answer directly in Chinese.
+            **IMPORTANT**: First, think step-by-step inside [THOUGHT] tags.
+            """
+            history_text = "\n".join([f"User: {h.get('user','')}\nAI: {h.get('ai','')}" for h in chat_history[-3:]])
+            prompt = ChatPromptTemplate.from_template(template)
+            chain = prompt | self.brain | StrOutputParser()
+            try:
+                response = chain.invoke({"query": user_query, "history": history_text})
+            except:
+                response = "你好！我是 Galaxy 生信助手。"
+            return self._parse_llm_response(response, context="chat", user_query=user_query)
+
+        else:
+            bio_intent = self._classify_bio_intent(user_query, chat_history)
+            history_text = "\n".join([f"User: {h.get('user','')}\nAI: {h.get('ai','')}" for h in chat_history[-3:]])
+
+            # === 自然语言直接触发工作流执行 ===
+            if bio_intent == "EXECUTION" and ("seurat" in user_query.lower()) and ("流程" in user_query or "工作流" in user_query or "workflow" in user_query.lower()):
+                
+                force_history = "历史" in user_query or "history" in user_query.lower()
+                
+                if not file_context_list:
+                    history_files = self._get_history_datasets()
+                    parsed_files = self._parse_files_from_query(user_query, history_files)
+                    
+                    if parsed_files:
+                        print(f"   [NLP File Parse] Identified files: {[f['name'] for f in parsed_files]}")
+                        file_context_list = parsed_files 
+                    elif not use_history_files and not force_history:
+                        if history_files:
+                            return {
+                                "type": "data_selector",
+                                "datasets": history_files,
+                                "reply": "检测到您当前未上传文件，但 Galaxy 历史记录中存在数据。请勾选要用于本次分析的文件：",
+                                "thought": "[THOUGHT]用户想通过自然语言执行流程，但未检测到上传文件，引导选择历史数据。[/THOUGHT]"
+                            }
+                        else:
+                            return {"type": "text", "reply": "请先上传 Matrix/Genes/Barcodes 文件，我才能为您执行分析。", "thought": "[THOUGHT]缺少输入数据，无法执行。[/THOUGHT]"}
+                
+                if force_history and not file_context_list:
+                     history_files = self._get_history_datasets()
+                     return {
+                            "type": "data_selector",
+                            "datasets": history_files,
+                            "reply": "好的，已为您加载历史数据。请勾选本次分析需要使用的文件：",
+                            "thought": "[THOUGHT]用户明确要求使用历史数据，弹出选择器供确认。[/THOUGHT]"
+                        }
+
+                template_key = "seurat_standard"
+                wf_template = WORKFLOW_TEMPLATES[template_key]
+                steps_for_execution = []
+                print(f"   [Auto-Execute] Resolving tool IDs for {wf_template['name']}...")
+                
+                for step in wf_template['steps']:
+                    real_tool_id = self._find_tool_id_by_keyword(step['tool_keyword'])
+                    if not real_tool_id:
+                        print(f"   [Auto-Execute] Warning: Tool '{step['tool_keyword']}' not found.")
+                        real_tool_id = "UNKNOWN_TOOL"
+                    
+                    steps_for_execution.append({
+                        "name": step['name'],
+                        "tool_keyword": step['tool_keyword'],
+                        "tool_id": real_tool_id,
+                        "desc": step['desc'],
+                        "params": step['params'] 
+                    })
+
+                constructed_workflow_data = {
+                    "workflow_name": wf_template['name'],
+                    "steps": steps_for_execution
+                }
+
+                run_id = wf_manager.create_task("Seurat Workflow (Auto)", len(steps_for_execution))
+                threading.Thread(target=self._execute_workflow_background, args=(run_id, constructed_workflow_data, file_context_list)).start()
+
+                return {
+                    "type": "workflow_started",
+                    "run_id": run_id,
+                    "reply": f"已理解您的指令。正在基于您指定的 **{len(file_context_list)} 个文件**，使用标准参数执行 **{wf_template['name']}**。",
+                    "thought": f"[THOUGHT]检测到明确的执行意图和文件指定（通过NLP解析）。已自动加载数据和模板，直接启动后台任务。[/THOUGHT]"
+                }
+
+            # === WORKFLOW_PLANNING ===
+            if bio_intent == "WORKFLOW_PLANNING":
+                just_looking = "看看" in user_query or "列出" in user_query or "list" in user_query.lower() or "步骤" in user_query
+                
+                if not just_looking:
+                    if not file_context_list:
+                        history_files = self._get_history_datasets()
+                        parsed_files = self._parse_files_from_query(user_query, history_files)
+                        
+                        if parsed_files:
+                            file_context_list = parsed_files
+                        elif not use_history_files:
+                            if history_files:
+                                return {
+                                    "type": "data_selector",
+                                    "datasets": history_files,
+                                    "reply": "检测到您当前未上传文件，但 Galaxy 历史记录中存在数据。是否直接使用？",
+                                    "thought": "[THOUGHT]用户想跑流程但没传文件，检测到历史数据，推荐复用。[/THOUGHT]"
+                                }
+
+                template_key = "seurat_standard"
+                wf = WORKFLOW_TEMPLATES[template_key]
+                steps_with_params = []
+                
+                for step in wf['steps']:
+                    real_tool_id = self._find_tool_id_by_keyword(step['tool_keyword'])
+                    
+                    frontend_params = []
+                    if isinstance(step['params'], dict):
+                        for k, v in step['params'].items():
+                            frontend_params.append({
+                                "name": k,
+                                "label": k,
+                                "type": "text",
+                                "value": v,
+                                "help": "Default parameter"
+                            })
+                    else:
+                        frontend_params = step['params']
+
+                    steps_with_params.append({
+                        "name": step['name'],
+                        "tool_id": real_tool_id if real_tool_id else "UNKNOWN_TOOL", 
+                        "desc": step['desc'],
+                        "params": frontend_params 
+                    })
+                
+                reply_msg = f"已为您规划 **{wf['name']}**，包含 {len(steps_with_params)} 个步骤。已为您预填了**最佳实践参数**："
+                if file_context_list:
+                    reply_msg += f"\n\n✅ 已选中 {len(file_context_list)} 个文件用于分析。"
+
+                return {
+                    "type": "workflow_config",
+                    "workflow_name": wf['name'],
+                    "steps": steps_with_params,
+                    "reply": reply_msg,
+                    "thought": "[THOUGHT]识别到用户需要单细胞全流程。已加载 Seurat 标准模板并注入智能默认参数。[/THOUGHT]"
+                }
+
+            elif bio_intent == "CONSULTATION":
+                if not self.vector_db:
+                    return {"type": "text", "reply": "⚠️ 咨询功能需要加载知识库 (ChromaDB)，目前未检测到数据。", "thought": None}
+                retriever = self.vector_db.as_retriever(search_kwargs={"k": 25})
+                docs = retriever.invoke(user_query)
+                retrieved_tools = "\n".join([f"- {d.page_content}" for i, d in enumerate(docs)])
+                template = """
+                You are a Galaxy Tool Consultant. User Request: "{query}"
+                【Available Tools (RAG)】 {retrieved_tools}
+                **TASK**: List tools in JSON format.
+                **MANDATORY**: 
+                1. Start with [THOUGHT]...[/THOUGHT] to explain your reasoning.
+                2. Then output ONLY the JSON list. NO extra text.
+                Output Format: 
+                [THOUGHT]...[/THOUGHT]
+                ```json
+                [ {{"name": "...", "id": "..."}}, ... ]
+                ```
+                """
+                prompt = ChatPromptTemplate.from_template(template)
+                chain = prompt | self.brain | StrOutputParser()
+                response = chain.invoke({"query": user_query, "retrieved_tools": retrieved_tools})
+                
+            else: # EXECUTION (单工具或其他)
+                tool_key = self._identify_tool_key(user_query)
+                if tool_key in TOOL_REQUIREMENTS:
+                    if not file_context_list and not use_history_files:
+                        history_files = self._get_history_datasets()
+                        if history_files:
+                            return {
+                                "type": "data_selector",
+                                "datasets": history_files,
+                                "reply": "检测到您当前未上传文件，但 Galaxy 历史记录中存在数据。是否直接使用？",
+                                "thought": "[THOUGHT]用户想运行工具但没传文件，检测到历史数据，推荐复用。[/THOUGHT]"
+                            }
+                    return {"type": "text", "reply": "单工具执行暂未适配后台任务模式，建议使用工作流。", "thought": None}
+                else:
+                    return {"type": "text", "reply": "通用代码生成模式。", "thought": None}
+
+            return self._parse_llm_response(response, context="chat", user_query=user_query)
+
+    def _map_params_for_galaxy(self, tool_keyword, user_params):
+        """【核心修复】参数映射：支持 ID 匹配和大小写不敏感，并清洗非法字符"""
+        mapped = {}
+        key = tool_keyword.lower()
+        
+        if "filtercells" in key or "filter_cells" in key:
+            if "subset_name" in user_params:
+                # 【清洗】去掉下划线，防止 Galaxy 报错 "only letters or numbers"
+                clean_name = user_params["subset_name"].replace("_", "").replace("-", "")
+                mapped["subsets_0|name"] = clean_name
+            if "low_threshold" in user_params:
+                mapped["subsets_0|low_threshold"] = user_params["low_threshold"]
+            if "high_threshold" in user_params:
+                mapped["subsets_0|high_threshold"] = user_params["high_threshold"]
+            return mapped
+            
+        if "normalisedata" in key or "normalise_data" in key:
+            return user_params 
+            
+        return user_params
+
+    def _execute_workflow_background(self, run_id, workflow_data, file_context_list):
+        steps = workflow_data['steps']
+        last_output_id = None
+        
+        histories = gi.histories.get_histories()
+        history_id = histories[0]['id']
+        
+        matrix_id = next((f['id'] for f in file_context_list if 'matrix' in f['name'].lower() or f['name'].endswith('.mtx')), None)
+        genes_id = next((f['id'] for f in file_context_list if 'genes' in f['name'].lower() or 'features' in f['name'].lower()), None)
+        barcodes_id = next((f['id'] for f in file_context_list if 'barcodes' in f['name'].lower()), None)
+
+        print(f"   [后台任务 {run_id}] 开始执行 {len(steps)} 个步骤...")
+        
+        for i, step in enumerate(steps):
+            tool_id = step['tool_id']
+            step_name = step['name']
+            user_params = step['params']
+            
+            if tool_id == "UNKNOWN_TOOL":
+                wf_manager.fail_task(run_id, f"步骤 {step_name} 对应的工具在 Galaxy 中未找到。")
+                return
+
+            wf_manager.update_step(run_id, i, step_name, "running", f"正在提交任务: {step_name} (ID: {tool_id})")
+            
+            try:
+                kw = step.get('tool_keyword', tool_id)
+                tool_inputs = self._map_params_for_galaxy(kw, user_params)
+                
+                if i == 0 and ("create" in tool_id or "read10x" in tool_id):
+                    if not (matrix_id and genes_id and barcodes_id):
+                            wf_manager.fail_task(run_id, "缺少必要的 10x 文件 (Matrix/Genes/Barcodes)")
+                            return
+                    tool_inputs['method|method'] = 'CreateSeuratObject'
+                    tool_inputs['method|input_type|input_type'] = 'mtx'
+                    tool_inputs['method|input_type|matrix'] = {'src': 'hda', 'id': matrix_id}
+                    tool_inputs['method|input_type|gene_names'] = {'src': 'hda', 'id': genes_id}
+                    tool_inputs['method|input_type|cell_barcodes'] = {'src': 'hda', 'id': barcodes_id}
+                else:
+                    # 【核心修复】智能输入文件嗅探
+                    if last_output_id:
+                        input_rds_id = last_output_id
+                        print(f"   [Task {run_id}] Using previous step output: {input_rds_id}")
+                    else:
+                        # 中途上车：在文件列表中找 RDS
+                        rds_file = next((f for f in file_context_list if 'rds' in f['name'].lower() or 'rdata' in f['name'].lower() or 'seurat' in f['name'].lower()), None)
+                        if rds_file:
+                            input_rds_id = rds_file['id']
+                            print(f"   [Task {run_id}] Using user-selected RDS file: {rds_file['name']} ({input_rds_id})")
+                        else:
+                            wf_manager.fail_task(run_id, f"错误：步骤 {step_name} 需要 RDS 文件作为输入，但未找到上一步输出或已选文件中的 RDS 文件。")
+                            return
+
+                    tool_inputs['rds_seurat_file'] = {'src': 'hda', 'id': input_rds_id}
+                
+                print(f"   [Task {run_id}] Submitting tool {tool_id} with inputs: {tool_inputs}")
+                ret = gi.tools.run_tool(tool_id=tool_id, tool_inputs=tool_inputs, history_id=history_id)
+                
+                if ret['jobs']:
+                    job_id = ret['jobs'][0]['id']
+                    wf_manager.update_step(run_id, i, step_name, "running", f"Job ID: {job_id} 已提交，等待完成...")
+                    
+                    poll_interval = 2 
+                    max_interval = 30 
+                    
+                    while True:
+                        job_info = gi.jobs.show_job(job_id)
+                        state = job_info['state']
+                        
+                        if state == 'ok':
+                            wf_manager.update_step(run_id, i, step_name, "success", f"任务完成。")
+                            if ret['outputs']:
+                                last_output_id = ret['outputs'][0]['id']
+                            break
+                        elif state in ['error', 'deleted']:
+                            stderr = job_info.get('tool_stderr', 'No stderr')
+                            wf_manager.fail_task(run_id, f"Galaxy Job Failed: {state}. Error: {stderr}")
+                            return
+                        
+                        time.sleep(poll_interval)
+                        poll_interval = min(poll_interval + 2, max_interval)
+                        
+                else:
+                    wf_manager.fail_task(run_id, "Galaxy 未返回 Job ID")
+                    return
+                    
+            except Exception as e:
+                error_msg = str(e)
+                print(f"   [Task {run_id}] Exception: {traceback.format_exc()}")
+                wf_manager.fail_task(run_id, f"执行异常: {error_msg}")
+                return
+        
+        wf_manager.complete_task(run_id)
+
+    def _handle_tool_selection(self, tool_info, file_context_list):
+        tool_name = tool_info['name']
+        tool_id = tool_info.get('id', '')
+        if not tool_id or "unknown" in tool_id.lower():
+            tool_id = self._find_tool_id_by_keyword(tool_name)
+        
+        if tool_id:
+            params = self._fetch_galaxy_tool_params(tool_name) 
+            return {"type": "tool_config", "tool_name": tool_name, "tool_id": tool_id, "params": params or [], "reply": f"已获取 **{tool_name}** 的配置参数，请确认：", "thought": f"[THOUGHT]成功调用 Galaxy API 获取了工具参数结构。[/THOUGHT]"}
+        else:
+            return self._generate_code_only(f"Run {tool_name}", file_context_list, tool_info)
+
+    def _generate_code_with_params(self, tool_info, user_params, file_context_list):
+        files_desc = "\n".join([f"- ID: {f['id']} | Filename: {f['name']}" for f in file_context_list])
+        params_json = json.dumps(user_params, indent=2, ensure_ascii=False)
+        template = """
+        You are a Galaxy BioBlend Expert. 
+        Target Tool: "{tool_name}" (ID: {tool_id})
+        【User Configured Parameters】 {params_json}
+        【Available Files】 {files_desc}
+        **TASK**: Write Python code to run this tool.
+        **CRITICAL**: 
+        1. Use `gi.tools.run_tool`. 
+        2. **INPUT CHAINING**: Find the latest dataset in history to use as input (if required).
+        3. Map user parameters to `tool_inputs`.
+        4. Start with [THOUGHT] tags.
+        """
+        prompt = ChatPromptTemplate.from_template(template)
+        chain = prompt | self.brain | StrOutputParser()
+        response = chain.invoke({
+            "tool_name": tool_info['name'],
+            "tool_id": tool_info['id'],
+            "params_json": params_json,
+            "files_desc": files_desc
+        })
+        return self._parse_llm_response(response, context="execution")
+
+    def _generate_code_only(self, query, file_context_list, tool_info):
+        files_desc = "\n".join([f"- ID: {f['id']} | Filename: {f['name']}" for f in file_context_list])
+        template = """
+        You are a Galaxy BioBlend Expert. User selected tool "{tool_name}" (ID: {tool_id}).
+        【Available Files】 {files_desc}
+        **CRITICAL**: Use `gi`. No `if __name__`.
+        **MANDATORY**: Start with [THOUGHT] tags. Output Python Code.
+        """
+        prompt = ChatPromptTemplate.from_template(template)
+        chain = prompt | self.brain | StrOutputParser()
+        response = chain.invoke({
+            "tool_name": tool_info['name'],
+            "tool_id": tool_info['id'],
+            "query": query,
+            "files_desc": files_desc
+        })
+        return self._parse_llm_response(response, context="execution", user_query=query)
+
+    def _extract_thought(self, text):
+        thought = None
+        clean_text = text
+        patterns = [r"<think>(.*?)</think>", r"\[THOUGHT\](.*?)\[/THOUGHT\]", r"\[THOUGHT\](.*?)$"]
+        for pattern in patterns:
+            match = re.search(pattern, text, re.DOTALL | re.IGNORECASE)
+            if match:
+                thought = match.group(1).strip()
+                clean_text = re.sub(pattern, "", text, flags=re.DOTALL | re.IGNORECASE).strip()
+                break
+        filler_phrases = ["Now produce the final answer.", "Here is the answer:", "Answer:", "Here is the list of tools:", "Now, I will provide the answer."]
+        for phrase in filler_phrases:
+            if clean_text.lstrip().startswith(phrase):
+                clean_text = clean_text.replace(phrase, "", 1).strip()
+        return thought, clean_text
+
+    def _parse_llm_response(self, response, context="chat", user_query=""):
+        response = response.strip()
+        thought_content, clean_response = self._extract_thought(response)
+        if "```python" in clean_response:
+            try:
+                code = clean_response.split("```python")[1].split("```")[0].strip()
+                success, exec_out, error_msg = self._execute_code_sandbox(code)
+                if success:
+                    final_reply = f"### 🤖 策略代码\n```python\n{code}\n```\n### ✅ 执行结果\n```text\n{exec_out}\n```"
+                    return {"type": "text", "reply": final_reply, "thought": thought_content, "suggestions": ["保存结果", "可视化"]}
+                else:
+                    diagnosis = self._analyze_error_and_guide(user_query, code, error_msg)
+                    return {"type": "text", "reply": diagnosis, "thought": thought_content, "suggestions": ["重试"]}
+            except: return {"type": "text", "reply": clean_response, "thought": thought_content, "suggestions": []}
+        json_candidate = None
+        if "```json" in clean_response: json_candidate = clean_response.split("```json")[1].split("```")[0].strip()
+        elif clean_response.strip().startswith("[") and clean_response.strip().endswith("]"): json_candidate = clean_response.strip()
+        else:
+            start = clean_response.find("[")
+            end = clean_response.rfind("]")
+            if start != -1 and end != -1 and end > start: json_candidate = clean_response[start : end + 1]
+        if json_candidate:
+            try:
+                candidates = json.loads(json_candidate)
+                return self._process_json_candidates(json.dumps(candidates), thought_content)
+            except json.JSONDecodeError:
+                try:
+                    candidates = ast.literal_eval(json_candidate)
+                    return self._process_json_candidates(json.dumps(candidates), thought_content)
+                except: pass 
+        return {"type": "text", "reply": clean_response, "thought": thought_content, "suggestions": []}
+
+    def _process_json_candidates(self, json_str, thought_content):
+        try:
+            candidates = json.loads(json_str)
+            if not isinstance(candidates, list): candidates = [candidates]
+            cleaned_candidates = []
+            for c in candidates:
+                if isinstance(c, str):
+                    if "unknown" in c.lower(): continue
+                    c = {"name": c, "id": ""}
+                elif isinstance(c, dict):
+                    name = c.get('name', 'Unknown Tool')
+                    raw_id = c.get('id', '')
+                    if "unknown" in name.lower() or "unknown" in raw_id.lower(): continue
+                    c['id'] = raw_id
+                cleaned_candidates.append(c)
+            if not cleaned_candidates: return {"type": "text", "reply": "未找到相关工具。", "thought": thought_content, "suggestions": []}
+            return {"type": "choice", "reply": f"为您找到了 {len(cleaned_candidates)} 个相关工具：", "candidates": cleaned_candidates, "thought": thought_content, "suggestions": []}
+        except: return {"type": "text", "reply": json_str, "thought": thought_content, "suggestions": []}
+
+    def _analyze_error_and_guide(self, query, code, error_msg):
+        chain = self.error_analysis_prompt | self.brain | StrOutputParser()
+        try:
+            short_error = error_msg[-2000:] if len(error_msg) > 2000 else error_msg
+            diagnosis = chain.invoke({"query": query, "code_snippet": code[:500], "error_msg": short_error})
+            thought, clean_diag = self._extract_thought(diagnosis)
+            return clean_diag 
+        except Exception as e: return f"❌ 执行出错。\n原始错误: {str(e)}"
+
+    def _execute_code_sandbox(self, code):
+        if not gi: return False, "", "Galaxy 未连接"
+        output_buffer = io.StringIO()
+        try:
+            sandbox = {"gi": gi, "json": json, "print": print}
+            with contextlib.redirect_stdout(output_buffer): exec(code, sandbox)
+            return True, output_buffer.getvalue() or "(执行成功，无屏幕输出)", ""
+        except Exception: return False, "", traceback.format_exc()
+
+app = FastAPI()
+templates = Jinja2Templates(directory="templates")
+agent = BioBlendAgent()
+
+class ChatRequest(BaseModel):
+    message: str
+    history: List[Dict[str, str]] = [] 
+    selected_tool: Optional[Dict[str, Any]] = None
+    tool_params: Optional[Dict[str, Any]] = None
+    workflow_data: Optional[Dict[str, Any]] = None
+    uploaded_files: List[Dict[str, Any]] = [] 
+    use_history_files: bool = False 
+
+@app.get("/", response_class=HTMLResponse)
+async def read_root(request: Request):
+    return templates.TemplateResponse("index.html", {"request": request})
+
+@app.post("/api/upload")
+async def upload_handler(file: UploadFile = File(...)):
+    try:
+        temp_path = f"temp_{file.filename}"
+        with open(temp_path, "wb") as buffer:
+            shutil.copyfileobj(file.file, buffer)
+        result = {"status": "success", "file_name": file.filename}
+        if file.filename.lower().endswith(('.png', '.jpg', '.jpeg')):
+            ocr_text = agent.ocr_image(temp_path)
+            result["type"] = "image"
+            result["ocr_text"] = ocr_text
+            result["suggestions"] = []
+            os.remove(temp_path) 
+        else:
+            if gi:
+                histories = gi.histories.get_histories()
+                hid = histories[0]['id'] if histories else gi.histories.create_history("GPT-OSS Analysis")['id']
+                max_retries = 3
+                for attempt in range(max_retries):
+                    try:
+                        print(f"Uploading {file.filename} (Attempt {attempt+1}/{max_retries})...")
+                        ret = gi.tools.upload_file(temp_path, hid)
+                        result["type"] = "data"
+                        result["file_id"] = ret['outputs'][0]['id']
+                        result["suggestions"] = []
+                        break 
+                    except Exception as upload_err:
+                        print(f"Upload failed: {upload_err}")
+                        if attempt < max_retries - 1: time.sleep(2) 
+                        else: raise upload_err
+                os.remove(temp_path)
+            else:
+                return {"status": "error", "message": "Galaxy 未连接"}
+        return result
+    except Exception as e:
+        return {"status": "error", "message": f"上传失败: {str(e)}"}
+
+@app.post("/api/chat")
+async def chat_handler(req: ChatRequest):
+    try:
+        response = agent.smart_process(
+            req.message, 
+            req.uploaded_files, 
+            req.history, 
+            req.selected_tool, 
+            req.tool_params, 
+            req.workflow_data,
+            req.use_history_files
+        )
+        return response
+    except Exception as e:
+        traceback.print_exc()
+        return JSONResponse(status_code=500, content={"type": "text", "reply": f"❌ 系统内部错误: {str(e)}", "thought": None, "suggestions": ["重试"]})
+
+@app.get("/api/workflow/status/{run_id}")
+async def get_workflow_status(run_id: str):
+    if run_id in wf_manager.tasks:
+        return wf_manager.tasks[run_id]
+    return {"status": "not_found"}
+
+if __name__ == "__main__":
+    uvicorn.run(app, host="0.0.0.0", port=PORT)

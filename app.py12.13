@@ -39,73 +39,21 @@ VECTOR_DB_PATH = "./data/chroma_db_bioblend"
 GALAXY_URL = os.getenv("GALAXY_URL", "https://usegalaxy.org")
 GALAXY_KEY = os.getenv("GALAXY_API_KEY", "")
 
-# --- 工作流定义 (回归 Galaxy 默认宽松参数，确保跑通) ---
+# --- 工作流定义 ---
 WORKFLOW_TEMPLATES = {
     "seurat_standard": {
         "name": "Seurat 单细胞标准分析流程",
         "steps": [
-            {
-                "name": "1. 创建对象 (Create)", 
-                "tool_keyword": "Seurat Create", 
-                "desc": "导入 10x 数据生成 RDS", 
-                # 【默认值】0 门槛，确保生成对象，防止小数据被过滤空
-                "params": {"min_cells": "0", "min_features": "0", "project_name": "Project1"}
-            },
-            {
-                "name": "2. 细胞过滤 (Filter)", 
-                "tool_keyword": "Seurat FilterCells", 
-                "desc": "根据基因数/线粒体比例过滤", 
-                # 【默认值】0 到 10亿，相当于“不过滤”，确保数据能流向下一步
-                "params": {"subset_name": "nFeature_RNA", "low_threshold": "0", "high_threshold": "1000000000"}
-            },
-            {
-                "name": "3. 归一化 (Normalize)", 
-                "tool_keyword": "Seurat NormaliseData", 
-                "desc": "LogNormalize 标准化", 
-                "params": {"normalization_method": "LogNormalize", "scale_factor": "10000"}
-            },
-            {
-                "name": "4. 高变基因 (FindVarGenes)", 
-                "tool_keyword": "Seurat FindVariableGenes", 
-                "desc": "寻找高变异特征", 
-                "params": {"selection_method": "vst", "nfeatures": "2000"}
-            },
-            {
-                "name": "5. 数据缩放 (ScaleData)", 
-                "tool_keyword": "Seurat ScaleData", 
-                "desc": "线性缩放数据", 
-                "params": {"do_center": "true", "do_scale": "true"}
-            },
-            {
-                "name": "6. PCA 降维 (RunPCA)", 
-                "tool_keyword": "Seurat RunPCA", 
-                "desc": "主成分分析", 
-                "params": {"npcs": "50"}
-            },
-            {
-                "name": "7. 构建邻接图 (FindNeighbors)", 
-                "tool_keyword": "Seurat FindNeighbours", 
-                "desc": "构建 SNN 图", 
-                "params": {"dims": "1:10", "k_param": "20"}
-            },
-            {
-                "name": "8. 细胞聚类 (FindClusters)", 
-                "tool_keyword": "Seurat FindClusters", 
-                "desc": "Louvain 聚类", 
-                "params": {"resolution": "0.5", "algorithm": "1"}
-            },
-            {
-                "name": "9. UMAP 可视化 (RunUMAP)", 
-                "tool_keyword": "Seurat Run UMAP", 
-                "desc": "非线性降维可视化", 
-                "params": {"dims": "1:10"}
-            },
-            {
-                "name": "10. 差异分析 (FindMarkers)", 
-                "tool_keyword": "Seurat FindMarkers", 
-                "desc": "寻找 Cluster Marker 基因", 
-                "params": {"min_pct": "0.1", "logfc_threshold": "0.25"}
-            }
+            {"name": "1. 创建对象 (Create)", "tool_keyword": "Seurat Create", "desc": "导入 10x 数据生成 RDS", "params": {"min_cells": "0", "min_features": "0", "project_name": "Project1"}},
+            {"name": "2. 细胞过滤 (Filter)", "tool_keyword": "Seurat FilterCells", "desc": "根据基因数/线粒体比例过滤", "params": {"subset_name": "nFeature_RNA", "low_threshold": "0", "high_threshold": "1000000000"}},
+            {"name": "3. 归一化 (Normalize)", "tool_keyword": "Seurat NormaliseData", "desc": "LogNormalize 标准化", "params": {"normalization_method": "LogNormalize", "scale_factor": "10000"}},
+            {"name": "4. 高变基因 (FindVarGenes)", "tool_keyword": "Seurat FindVariableGenes", "desc": "寻找高变异特征", "params": {"selection_method": "vst", "nfeatures": "2000"}},
+            {"name": "5. 数据缩放 (ScaleData)", "tool_keyword": "Seurat ScaleData", "desc": "线性缩放数据", "params": {"do_center": "true", "do_scale": "true"}},
+            {"name": "6. PCA 降维 (RunPCA)", "tool_keyword": "Seurat RunPCA", "desc": "主成分分析", "params": {"npcs": "50"}},
+            {"name": "7. 构建邻接图 (FindNeighbors)", "tool_keyword": "Seurat FindNeighbours", "desc": "构建 SNN 图", "params": {"dims": "1:10", "k_param": "20"}},
+            {"name": "8. 细胞聚类 (FindClusters)", "tool_keyword": "Seurat FindClusters", "desc": "Louvain 聚类", "params": {"resolution": "0.5", "algorithm": "1"}},
+            {"name": "9. UMAP 可视化 (RunUMAP)", "tool_keyword": "Seurat Run UMAP", "desc": "非线性降维可视化", "params": {"dims": "1:10"}},
+            {"name": "10. 差异分析 (FindMarkers)", "tool_keyword": "Seurat FindMarkers", "desc": "寻找 Cluster Marker 基因", "params": {"min_pct": "0.25", "logfc_threshold": "0.25"}}
         ]
     }
 }
@@ -187,6 +135,35 @@ class BioBlendAgent:
         【Task】 Analyze and provide a fix in Chinese.
         **IMPORTANT**: Explain reasoning inside [THOUGHT] tags first.
         """)
+        
+        # 【核心新增】语义路由 Prompt
+        self.router_prompt = ChatPromptTemplate.from_template("""
+        You are an intent classifier for a Bioinformatics AI Agent.
+        Analyze the User Input and Chat History to determine the user's intent.
+
+        Categories:
+        1. WORKFLOW_PLANNING: 
+           - User wants to design, plan, or list steps for a workflow (e.g., "Seurat pipeline", "show steps").
+           - User confirms to use history files for planning (e.g., "Yes", "Use these files").
+           - User asks to "check" or "list" data files for the purpose of planning.
+        2. EXECUTION: 
+           - User explicitly asks to RUN, EXECUTE, or START a tool or workflow.
+           - User confirms execution (e.g., "Run it", "Confirm").
+           - User uploads files and implies execution.
+        3. CONSULTATION: 
+           - User asks to search, find, or list available TOOLS (not workflow steps).
+           - e.g., "Find tools for PCA", "List all Seurat tools".
+        4. GENERAL: 
+           - Greetings, self-introduction, general biology questions, or unclear intent.
+
+        Chat History:
+        {history}
+
+        User Input:
+        {query}
+
+        Output ONLY the category name (WORKFLOW_PLANNING, EXECUTION, CONSULTATION, or GENERAL). Do not output anything else.
+        """)
 
     def _load_db(self):
         if os.path.exists(VECTOR_DB_PATH) and os.listdir(VECTOR_DB_PATH):
@@ -212,47 +189,43 @@ class BioBlendAgent:
             return f"OCR 识别失败: {str(e)}"
 
     def _analyze_domain(self, query):
-        template = """
-        You are a classifier. Output ONLY one word: "GALAXY_BIO" or "GENERAL".
-        User Input: "{query}"
-        """
-        prompt = ChatPromptTemplate.from_template(template)
-        chain = prompt | self.brain | StrOutputParser()
-        try:
-            return chain.invoke({"query": query[:1000]}).strip()
-        except:
-            return "GALAXY_BIO"
+        # 这个方法现在主要用于纯闲聊判断，核心路由已移至 _classify_bio_intent
+        return "GALAXY_BIO"
 
     def _classify_bio_intent(self, query, chat_history=[]):
-        query_lower = query.lower()
+        """【核心升级】基于 LLM 的语义路由"""
         
-        context_keywords = ""
+        # 构建历史记录字符串
+        history_str = ""
         if chat_history:
-            last_entry = chat_history[-1]
-            if 'ai' in last_entry:
-                last_ai_reply = last_entry['ai'].lower()
-                if "历史数据" in last_ai_reply or "history" in last_ai_reply:
-                    context_keywords += " history_reuse"
-                if "seurat" in last_ai_reply:
-                    context_keywords += " seurat"
-                if "工作流" in last_ai_reply or "workflow" in last_ai_reply:
-                    context_keywords += " workflow"
+            # 取最近 2 轮对话作为上下文
+            for msg in chat_history[-2:]:
+                history_str += f"User: {msg.get('user', '')}\nAI: {msg.get('ai', '')}\n"
         
-        augmented_query = query_lower + context_keywords
-        print(f"   [路由分析] 原句: '{query}' | 上下文增强: '{augmented_query}'")
-
-        if any(k in augmented_query for k in ["工具", "tools"]) and any(k in augmented_query for k in ["列出", "list", "find", "search", "查找", "推荐", "有哪些"]):
-            return "CONSULTATION"
-
-        if any(k in augmented_query for k in ["规划", "plan", "全流程", "pipeline", "workflow", "顺序", "order", "步骤", "steps", "怎么", "how to", "看看", "列出"]):
-            return "WORKFLOW_PLANNING"
+        try:
+            # 调用 LLM 进行分类
+            chain = self.router_prompt | self.brain | StrOutputParser()
+            intent = chain.invoke({"query": query, "history": history_str}).strip().upper()
             
-        if any(k in augmented_query for k in ["账户", "account", "user", "用户", "history", "历史", "run", "运行", "执行", "upload", "上传", "做", "完成", "create", "是", "yes", "确认", "好的"]):
-            if "history_reuse" in context_keywords and any(k in query_lower for k in ["是", "yes", "好", "ok", "确认"]):
-                return "WORKFLOW_PLANNING"
-            return "EXECUTION"
+            # 清洗 LLM 可能输出的多余标点
+            intent = re.sub(r'[^\w_]', '', intent)
             
-        return "GENERAL" 
+            print(f"   [语义路由] Input: '{query}' -> Intent: {intent}")
+            
+            valid_intents = ["WORKFLOW_PLANNING", "EXECUTION", "CONSULTATION", "GENERAL"]
+            if intent in valid_intents:
+                return intent
+            else:
+                print(f"   [语义路由] Unknown intent '{intent}', fallback to GENERAL")
+                return "GENERAL"
+                
+        except Exception as e:
+            print(f"   [语义路由] Error: {e}, fallback to keyword matching")
+            # 降级策略：如果 LLM 挂了，回退到简单的关键词匹配
+            query_lower = query.lower()
+            if "run" in query_lower or "执行" in query_lower: return "EXECUTION"
+            if "plan" in query_lower or "规划" in query_lower: return "WORKFLOW_PLANNING"
+            return "GENERAL"
 
     def _identify_tool_key(self, tool_name):
         name = tool_name.lower()
@@ -401,25 +374,11 @@ class BioBlendAgent:
                 "thought": "[THOUGHT]任务已移交后台任务管理器。[/THOUGHT]"
             }
 
-        is_checking_data = any(k in user_query for k in ["看看", "查看", "列出", "选", "哪些", "什么"]) and any(k in user_query for k in ["数据", "文件", "data", "file"])
-        if is_checking_data and not file_context_list:
-            history_files = self._get_history_datasets()
-            if history_files:
-                return {
-                    "type": "data_selector",
-                    "datasets": history_files,
-                    "reply": f"为您找到 Galaxy 历史记录中的最近 {len(history_files)} 个数据文件。请勾选您需要使用的文件：",
-                    "thought": "[THOUGHT]用户意图为查看或选择数据，直接调用后端接口获取历史文件列表并展示 UI。[/THOUGHT]"
-                }
-            else:
-                return {"type": "text", "reply": "当前 Galaxy 历史记录为空，请先上传文件。", "thought": None}
+        # 【核心修改】先进行语义路由，不再依赖硬编码关键词
+        bio_intent = self._classify_bio_intent(user_query, chat_history)
 
-        if any(x in user_query for x in ["介绍", "你是谁", "help", "帮助", "你好", "hello"]):
-            domain = "GENERAL"
-        else:
-            domain = self._analyze_domain(user_query)
-
-        if "GENERAL" in domain:
+        # 如果是 GENERAL，走通用闲聊
+        if bio_intent == "GENERAL":
             template = """
             You are a helpful AI Assistant. User Input: {query}. History: {history}. 
             Answer directly in Chinese.
@@ -434,21 +393,16 @@ class BioBlendAgent:
                 response = "你好！我是 Galaxy 生信助手。"
             return self._parse_llm_response(response, context="chat", user_query=user_query)
 
-        else:
-            bio_intent = self._classify_bio_intent(user_query, chat_history)
-            history_text = "\n".join([f"User: {h.get('user','')}\nAI: {h.get('ai','')}" for h in chat_history[-3:]])
-
-            # === 自然语言直接触发工作流执行 ===
-            if bio_intent == "EXECUTION" and ("seurat" in user_query.lower()) and ("流程" in user_query or "工作流" in user_query or "workflow" in user_query.lower()):
-                
+        # 如果是 EXECUTION，尝试自动执行
+        if bio_intent == "EXECUTION":
+            # 检查是否是 Seurat 流程
+            if "seurat" in user_query.lower() or "流程" in user_query or "工作流" in user_query:
                 force_history = "历史" in user_query or "history" in user_query.lower()
                 
                 if not file_context_list:
                     history_files = self._get_history_datasets()
                     parsed_files = self._parse_files_from_query(user_query, history_files)
-                    
                     if parsed_files:
-                        print(f"   [NLP File Parse] Identified files: {[f['name'] for f in parsed_files]}")
                         file_context_list = parsed_files 
                     elif not use_history_files and not force_history:
                         if history_files:
@@ -473,12 +427,10 @@ class BioBlendAgent:
                 template_key = "seurat_standard"
                 wf_template = WORKFLOW_TEMPLATES[template_key]
                 steps_for_execution = []
-                print(f"   [Auto-Execute] Resolving tool IDs for {wf_template['name']}...")
                 
                 for step in wf_template['steps']:
                     real_tool_id = self._find_tool_id_by_keyword(step['tool_keyword'])
                     if not real_tool_id:
-                        print(f"   [Auto-Execute] Warning: Tool '{step['tool_keyword']}' not found.")
                         real_tool_id = "UNKNOWN_TOOL"
                     
                     steps_for_execution.append({
@@ -503,92 +455,94 @@ class BioBlendAgent:
                     "reply": f"已理解您的指令。正在基于您指定的 **{len(file_context_list)} 个文件**，使用标准参数执行 **{wf_template['name']}**。",
                     "thought": f"[THOUGHT]检测到明确的执行意图和文件指定（通过NLP解析）。已自动加载数据和模板，直接启动后台任务。[/THOUGHT]"
                 }
+            else:
+                # 单工具执行逻辑 (暂略，可扩展)
+                return {"type": "text", "reply": "单工具执行暂未适配后台任务模式，建议使用工作流。", "thought": None}
 
-            # === WORKFLOW_PLANNING ===
-            if bio_intent == "WORKFLOW_PLANNING":
-                # 【核心修复】意图优先：无论有没有文件，先展示工作流卡片
-                template_key = "seurat_standard"
-                wf = WORKFLOW_TEMPLATES[template_key]
-                steps_with_params = []
-                
-                for step in wf['steps']:
-                    real_tool_id = self._find_tool_id_by_keyword(step['tool_keyword'])
-                    
-                    frontend_params = []
-                    if isinstance(step['params'], dict):
-                        for k, v in step['params'].items():
-                            frontend_params.append({
-                                "name": k,
-                                "label": k,
-                                "type": "text",
-                                "value": v,
-                                "help": "Default parameter"
-                            })
-                    else:
-                        frontend_params = step['params']
+        # 如果是 WORKFLOW_PLANNING
+        if bio_intent == "WORKFLOW_PLANNING":
+            if not file_context_list:
+                history_files = self._get_history_datasets()
+                parsed_files = self._parse_files_from_query(user_query, history_files)
+                if parsed_files:
+                    file_context_list = parsed_files
+                elif not use_history_files:
+                    # 如果用户只是想看步骤，不弹窗；如果用户想规划具体数据，弹窗
+                    # 这里简化为：如果没有文件，且不是纯查看，就弹窗
+                    is_pure_view = "看看" in user_query or "列出" in user_query
+                    if not is_pure_view and history_files:
+                        return {
+                            "type": "data_selector",
+                            "datasets": history_files,
+                            "reply": "检测到您当前未上传文件，但 Galaxy 历史记录中存在数据。是否直接使用？",
+                            "thought": "[THOUGHT]用户想跑流程但没传文件，检测到历史数据，推荐复用。[/THOUGHT]"
+                        }
 
-                    steps_with_params.append({
-                        "name": step['name'],
-                        "tool_id": real_tool_id if real_tool_id else "UNKNOWN_TOOL", 
-                        "desc": step['desc'],
-                        "params": frontend_params 
-                    })
+            template_key = "seurat_standard"
+            wf = WORKFLOW_TEMPLATES[template_key]
+            steps_with_params = []
+            
+            for step in wf['steps']:
+                real_tool_id = self._find_tool_id_by_keyword(step['tool_keyword'])
                 
-                reply_msg = f"已为您规划 **{wf['name']}**，包含 {len(steps_with_params)} 个步骤。已为您预填了**最佳实践参数**："
-                
-                if not file_context_list and not use_history_files:
-                    reply_msg += "\n\n⚠️ **注意**：检测到您尚未选择数据文件。您可以在查看步骤后，告诉我要使用的文件（例如：“使用历史记录中的 matrix 文件”）。"
-                elif file_context_list:
-                    reply_msg += f"\n\n✅ 将基于已选的 {len(file_context_list)} 个文件进行分析。"
-
-                return {
-                    "type": "workflow_config",
-                    "workflow_name": wf['name'],
-                    "steps": steps_with_params,
-                    "reply": reply_msg,
-                    "thought": "[THOUGHT]用户意图为规划工作流。遵循“意图优先”原则，直接展示工作流步骤卡片，将数据检查后置。[/THOUGHT]"
-                }
-
-            elif bio_intent == "CONSULTATION":
-                if not self.vector_db:
-                    return {"type": "text", "reply": "⚠️ 咨询功能需要加载知识库 (ChromaDB)，目前未检测到数据。", "thought": None}
-                retriever = self.vector_db.as_retriever(search_kwargs={"k": 25})
-                docs = retriever.invoke(user_query)
-                retrieved_tools = "\n".join([f"- {d.page_content}" for i, d in enumerate(docs)])
-                template = """
-                You are a Galaxy Tool Consultant. User Request: "{query}"
-                【Available Tools (RAG)】 {retrieved_tools}
-                **TASK**: List tools in JSON format.
-                **MANDATORY**: 
-                1. Start with [THOUGHT]...[/THOUGHT] to explain your reasoning.
-                2. Then output ONLY the JSON list. NO extra text.
-                Output Format: 
-                [THOUGHT]...[/THOUGHT]
-                ```json
-                [ {{"name": "...", "id": "..."}}, ... ]
-                ```
-                """
-                prompt = ChatPromptTemplate.from_template(template)
-                chain = prompt | self.brain | StrOutputParser()
-                response = chain.invoke({"query": user_query, "retrieved_tools": retrieved_tools})
-                
-            else: # EXECUTION (单工具或其他)
-                tool_key = self._identify_tool_key(user_query)
-                if tool_key in TOOL_REQUIREMENTS:
-                    if not file_context_list and not use_history_files:
-                        history_files = self._get_history_datasets()
-                        if history_files:
-                            return {
-                                "type": "data_selector",
-                                "datasets": history_files,
-                                "reply": "检测到您当前未上传文件，但 Galaxy 历史记录中存在数据。是否直接使用？",
-                                "thought": "[THOUGHT]用户想运行工具但没传文件，检测到历史数据，推荐复用。[/THOUGHT]"
-                            }
-                    return {"type": "text", "reply": "单工具执行暂未适配后台任务模式，建议使用工作流。", "thought": None}
+                frontend_params = []
+                if isinstance(step['params'], dict):
+                    for k, v in step['params'].items():
+                        frontend_params.append({
+                            "name": k,
+                            "label": k,
+                            "type": "text",
+                            "value": v,
+                            "help": "Default parameter"
+                        })
                 else:
-                    return {"type": "text", "reply": "通用代码生成模式。", "thought": None}
+                    frontend_params = step['params']
 
+                steps_with_params.append({
+                    "name": step['name'],
+                    "tool_id": real_tool_id if real_tool_id else "UNKNOWN_TOOL", 
+                    "desc": step['desc'],
+                    "params": frontend_params 
+                })
+            
+            reply_msg = f"已为您规划 **{wf['name']}**，包含 {len(steps_with_params)} 个步骤。已为您预填了**最佳实践参数**："
+            if file_context_list:
+                reply_msg += f"\n\n✅ 已选中 {len(file_context_list)} 个文件用于分析。"
+
+            return {
+                "type": "workflow_config",
+                "workflow_name": wf['name'],
+                "steps": steps_with_params,
+                "reply": reply_msg,
+                "thought": "[THOUGHT]识别到用户需要单细胞全流程。已加载 Seurat 标准模板并注入智能默认参数。[/THOUGHT]"
+            }
+
+        # 如果是 CONSULTATION
+        if bio_intent == "CONSULTATION":
+            if not self.vector_db:
+                return {"type": "text", "reply": "⚠️ 咨询功能需要加载知识库 (ChromaDB)，目前未检测到数据。", "thought": None}
+            retriever = self.vector_db.as_retriever(search_kwargs={"k": 25})
+            docs = retriever.invoke(user_query)
+            retrieved_tools = "\n".join([f"- {d.page_content}" for i, d in enumerate(docs)])
+            template = """
+            You are a Galaxy Tool Consultant. User Request: "{query}"
+            【Available Tools (RAG)】 {retrieved_tools}
+            **TASK**: List tools in JSON format.
+            **MANDATORY**: 
+            1. Start with [THOUGHT]...[/THOUGHT] to explain your reasoning.
+            2. Then output ONLY the JSON list. NO extra text.
+            Output Format: 
+            [THOUGHT]...[/THOUGHT]
+            ```json
+            [ {{"name": "...", "id": "..."}}, ... ]
+            ```
+            """
+            prompt = ChatPromptTemplate.from_template(template)
+            chain = prompt | self.brain | StrOutputParser()
+            response = chain.invoke({"query": user_query, "retrieved_tools": retrieved_tools})
             return self._parse_llm_response(response, context="chat", user_query=user_query)
+
+        return self._parse_llm_response(response, context="chat", user_query=user_query)
 
     def _map_params_for_galaxy(self, tool_keyword, user_params):
         mapped = {}
@@ -680,7 +634,6 @@ class BioBlendAgent:
                                 last_output_id = ret['outputs'][0]['id']
                             break
                         elif state in ['error', 'deleted']:
-                            # 【核心修复】软失败：记录错误，不终止，继续下一步
                             stderr = job_info.get('tool_stderr', 'No stderr')
                             print(f"   [Task {run_id}] Step failed (Soft Fail). Stderr: {stderr}")
                             wf_manager.update_step(run_id, i, step_name, "failed", f"任务失败 (已跳过): {stderr[:50]}...")

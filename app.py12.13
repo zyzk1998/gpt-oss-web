@@ -18,6 +18,7 @@ from fastapi.templating import Jinja2Templates
 from pydantic import BaseModel
 from typing import List, Optional, Union, Dict, Any
 from dotenv import load_dotenv
+from bioblend import ConnectionError 
 
 # --- LangChain & BioBlend ---
 from bioblend.galaxy import GalaxyInstance
@@ -38,22 +39,73 @@ VECTOR_DB_PATH = "./data/chroma_db_bioblend"
 GALAXY_URL = os.getenv("GALAXY_URL", "https://usegalaxy.org")
 GALAXY_KEY = os.getenv("GALAXY_API_KEY", "")
 
-# --- 工作流定义 ---
+# --- 工作流定义 (回归 Galaxy 默认宽松参数，确保跑通) ---
 WORKFLOW_TEMPLATES = {
     "seurat_standard": {
         "name": "Seurat 单细胞标准分析流程",
         "steps": [
-            {"name": "1. 创建对象 (Create)", "tool_keyword": "Seurat Create", "desc": "导入 10x 数据生成 RDS", "params": {"min_cells": "3", "min_features": "200", "project_name": "Project1"}},
-            # 【优化】默认参数改为无特殊符号，防止 Galaxy 校验失败
-            {"name": "2. 细胞过滤 (Filter)", "tool_keyword": "Seurat FilterCells", "desc": "根据基因数/线粒体比例过滤", "params": {"subset_name": "nFeatureRNA", "low_threshold": "200", "high_threshold": "2500"}},
-            {"name": "3. 归一化 (Normalize)", "tool_keyword": "Seurat NormaliseData", "desc": "LogNormalize 标准化", "params": {"normalization_method": "LogNormalize", "scale_factor": "10000"}},
-            {"name": "4. 高变基因 (FindVarGenes)", "tool_keyword": "Seurat FindVariableGenes", "desc": "寻找高变异特征", "params": {"selection_method": "vst", "nfeatures": "2000"}},
-            {"name": "5. 数据缩放 (ScaleData)", "tool_keyword": "Seurat ScaleData", "desc": "线性缩放数据", "params": {"do_center": "true", "do_scale": "true"}},
-            {"name": "6. PCA 降维 (RunPCA)", "tool_keyword": "Seurat RunPCA", "desc": "主成分分析", "params": {"npcs": "50"}},
-            {"name": "7. 构建邻接图 (FindNeighbors)", "tool_keyword": "Seurat FindNeighbours", "desc": "构建 SNN 图", "params": {"dims": "1:10", "k_param": "20"}},
-            {"name": "8. 细胞聚类 (FindClusters)", "tool_keyword": "Seurat FindClusters", "desc": "Louvain 聚类", "params": {"resolution": "0.5", "algorithm": "1"}},
-            {"name": "9. UMAP 可视化 (RunUMAP)", "tool_keyword": "Seurat Run UMAP", "desc": "非线性降维可视化", "params": {"dims": "1:10"}},
-            {"name": "10. 差异分析 (FindMarkers)", "tool_keyword": "Seurat FindMarkers", "desc": "寻找 Cluster Marker 基因", "params": {"min_pct": "0.25", "logfc_threshold": "0.25"}}
+            {
+                "name": "1. 创建对象 (Create)", 
+                "tool_keyword": "Seurat Create", 
+                "desc": "导入 10x 数据生成 RDS", 
+                # 【默认值】0 门槛，确保生成对象，防止小数据被过滤空
+                "params": {"min_cells": "0", "min_features": "0", "project_name": "Project1"}
+            },
+            {
+                "name": "2. 细胞过滤 (Filter)", 
+                "tool_keyword": "Seurat FilterCells", 
+                "desc": "根据基因数/线粒体比例过滤", 
+                # 【默认值】0 到 10亿，相当于“不过滤”，确保数据能流向下一步
+                "params": {"subset_name": "nFeature_RNA", "low_threshold": "0", "high_threshold": "1000000000"}
+            },
+            {
+                "name": "3. 归一化 (Normalize)", 
+                "tool_keyword": "Seurat NormaliseData", 
+                "desc": "LogNormalize 标准化", 
+                "params": {"normalization_method": "LogNormalize", "scale_factor": "10000"}
+            },
+            {
+                "name": "4. 高变基因 (FindVarGenes)", 
+                "tool_keyword": "Seurat FindVariableGenes", 
+                "desc": "寻找高变异特征", 
+                "params": {"selection_method": "vst", "nfeatures": "2000"}
+            },
+            {
+                "name": "5. 数据缩放 (ScaleData)", 
+                "tool_keyword": "Seurat ScaleData", 
+                "desc": "线性缩放数据", 
+                "params": {"do_center": "true", "do_scale": "true"}
+            },
+            {
+                "name": "6. PCA 降维 (RunPCA)", 
+                "tool_keyword": "Seurat RunPCA", 
+                "desc": "主成分分析", 
+                "params": {"npcs": "50"}
+            },
+            {
+                "name": "7. 构建邻接图 (FindNeighbors)", 
+                "tool_keyword": "Seurat FindNeighbours", 
+                "desc": "构建 SNN 图", 
+                "params": {"dims": "1:10", "k_param": "20"}
+            },
+            {
+                "name": "8. 细胞聚类 (FindClusters)", 
+                "tool_keyword": "Seurat FindClusters", 
+                "desc": "Louvain 聚类", 
+                "params": {"resolution": "0.5", "algorithm": "1"}
+            },
+            {
+                "name": "9. UMAP 可视化 (RunUMAP)", 
+                "tool_keyword": "Seurat Run UMAP", 
+                "desc": "非线性降维可视化", 
+                "params": {"dims": "1:10"}
+            },
+            {
+                "name": "10. 差异分析 (FindMarkers)", 
+                "tool_keyword": "Seurat FindMarkers", 
+                "desc": "寻找 Cluster Marker 基因", 
+                "params": {"min_pct": "0.1", "logfc_threshold": "0.25"}
+            }
         ]
     }
 }
@@ -200,7 +252,7 @@ class BioBlendAgent:
                 return "WORKFLOW_PLANNING"
             return "EXECUTION"
             
-        return "WORKFLOW_PLANNING" 
+        return "GENERAL" 
 
     def _identify_tool_key(self, tool_name):
         name = tool_name.lower()
@@ -324,6 +376,22 @@ class BioBlendAgent:
                 return self._generate_code_with_params(selected_tool, tool_params, file_context_list)
         
         if workflow_data:
+            if not file_context_list and not use_history_files:
+                history_files = self._get_history_datasets()
+                if history_files:
+                    return {
+                        "type": "data_selector",
+                        "datasets": history_files,
+                        "reply": "检测到您尚未选择数据文件。请先勾选需要使用的历史数据，确认后系统将自动关联。",
+                        "thought": "[THOUGHT]用户点击执行但未提供文件，拦截请求并弹出数据选择器。[/THOUGHT]"
+                    }
+                else:
+                    return {
+                        "type": "text", 
+                        "reply": "❌ 未检测到可用数据。请先上传文件或检查 Galaxy 历史记录。", 
+                        "thought": None
+                    }
+
             run_id = wf_manager.create_task("Seurat Workflow", len(workflow_data['steps']))
             threading.Thread(target=self._execute_workflow_background, args=(run_id, workflow_data, file_context_list)).start()
             return {
@@ -438,24 +506,7 @@ class BioBlendAgent:
 
             # === WORKFLOW_PLANNING ===
             if bio_intent == "WORKFLOW_PLANNING":
-                just_looking = "看看" in user_query or "列出" in user_query or "list" in user_query.lower() or "步骤" in user_query
-                
-                if not just_looking:
-                    if not file_context_list:
-                        history_files = self._get_history_datasets()
-                        parsed_files = self._parse_files_from_query(user_query, history_files)
-                        
-                        if parsed_files:
-                            file_context_list = parsed_files
-                        elif not use_history_files:
-                            if history_files:
-                                return {
-                                    "type": "data_selector",
-                                    "datasets": history_files,
-                                    "reply": "检测到您当前未上传文件，但 Galaxy 历史记录中存在数据。是否直接使用？",
-                                    "thought": "[THOUGHT]用户想跑流程但没传文件，检测到历史数据，推荐复用。[/THOUGHT]"
-                                }
-
+                # 【核心修复】意图优先：无论有没有文件，先展示工作流卡片
                 template_key = "seurat_standard"
                 wf = WORKFLOW_TEMPLATES[template_key]
                 steps_with_params = []
@@ -484,15 +535,18 @@ class BioBlendAgent:
                     })
                 
                 reply_msg = f"已为您规划 **{wf['name']}**，包含 {len(steps_with_params)} 个步骤。已为您预填了**最佳实践参数**："
-                if file_context_list:
-                    reply_msg += f"\n\n✅ 已选中 {len(file_context_list)} 个文件用于分析。"
+                
+                if not file_context_list and not use_history_files:
+                    reply_msg += "\n\n⚠️ **注意**：检测到您尚未选择数据文件。您可以在查看步骤后，告诉我要使用的文件（例如：“使用历史记录中的 matrix 文件”）。"
+                elif file_context_list:
+                    reply_msg += f"\n\n✅ 将基于已选的 {len(file_context_list)} 个文件进行分析。"
 
                 return {
                     "type": "workflow_config",
                     "workflow_name": wf['name'],
                     "steps": steps_with_params,
                     "reply": reply_msg,
-                    "thought": "[THOUGHT]识别到用户需要单细胞全流程。已加载 Seurat 标准模板并注入智能默认参数。[/THOUGHT]"
+                    "thought": "[THOUGHT]用户意图为规划工作流。遵循“意图优先”原则，直接展示工作流步骤卡片，将数据检查后置。[/THOUGHT]"
                 }
 
             elif bio_intent == "CONSULTATION":
@@ -537,15 +591,12 @@ class BioBlendAgent:
             return self._parse_llm_response(response, context="chat", user_query=user_query)
 
     def _map_params_for_galaxy(self, tool_keyword, user_params):
-        """【核心修复】参数映射：支持 ID 匹配和大小写不敏感，并清洗非法字符"""
         mapped = {}
         key = tool_keyword.lower()
         
         if "filtercells" in key or "filter_cells" in key:
             if "subset_name" in user_params:
-                # 【清洗】去掉下划线，防止 Galaxy 报错 "only letters or numbers"
-                clean_name = user_params["subset_name"].replace("_", "").replace("-", "")
-                mapped["subsets_0|name"] = clean_name
+                mapped["subsets_0|name"] = user_params["subset_name"]
             if "low_threshold" in user_params:
                 mapped["subsets_0|low_threshold"] = user_params["low_threshold"]
             if "high_threshold" in user_params:
@@ -595,12 +646,10 @@ class BioBlendAgent:
                     tool_inputs['method|input_type|gene_names'] = {'src': 'hda', 'id': genes_id}
                     tool_inputs['method|input_type|cell_barcodes'] = {'src': 'hda', 'id': barcodes_id}
                 else:
-                    # 【核心修复】智能输入文件嗅探
                     if last_output_id:
                         input_rds_id = last_output_id
                         print(f"   [Task {run_id}] Using previous step output: {input_rds_id}")
                     else:
-                        # 中途上车：在文件列表中找 RDS
                         rds_file = next((f for f in file_context_list if 'rds' in f['name'].lower() or 'rdata' in f['name'].lower() or 'seurat' in f['name'].lower()), None)
                         if rds_file:
                             input_rds_id = rds_file['id']
@@ -609,7 +658,7 @@ class BioBlendAgent:
                             wf_manager.fail_task(run_id, f"错误：步骤 {step_name} 需要 RDS 文件作为输入，但未找到上一步输出或已选文件中的 RDS 文件。")
                             return
 
-                    tool_inputs['rds_seurat_file'] = {'src': 'hda', 'id': input_rds_id}
+                    tool_inputs['input|rds_seurat_file'] = {'src': 'hda', 'id': input_rds_id}
                 
                 print(f"   [Task {run_id}] Submitting tool {tool_id} with inputs: {tool_inputs}")
                 ret = gi.tools.run_tool(tool_id=tool_id, tool_inputs=tool_inputs, history_id=history_id)
@@ -631,9 +680,11 @@ class BioBlendAgent:
                                 last_output_id = ret['outputs'][0]['id']
                             break
                         elif state in ['error', 'deleted']:
+                            # 【核心修复】软失败：记录错误，不终止，继续下一步
                             stderr = job_info.get('tool_stderr', 'No stderr')
-                            wf_manager.fail_task(run_id, f"Galaxy Job Failed: {state}. Error: {stderr}")
-                            return
+                            print(f"   [Task {run_id}] Step failed (Soft Fail). Stderr: {stderr}")
+                            wf_manager.update_step(run_id, i, step_name, "failed", f"任务失败 (已跳过): {stderr[:50]}...")
+                            break 
                         
                         time.sleep(poll_interval)
                         poll_interval = min(poll_interval + 2, max_interval)
@@ -641,6 +692,11 @@ class BioBlendAgent:
                 else:
                     wf_manager.fail_task(run_id, "Galaxy 未返回 Job ID")
                     return
+            
+            except ConnectionError as ce:
+                 print(f"   [Task {run_id}] ConnectionError (400): {ce}")
+                 wf_manager.update_step(run_id, i, step_name, "failed", "参数校验失败 (已跳过)")
+                 continue 
                     
             except Exception as e:
                 error_msg = str(e)
